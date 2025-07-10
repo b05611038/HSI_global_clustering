@@ -1,0 +1,6 @@
+pillow
+numpy
+scipy
+torch
+tensorboard
+safetensors

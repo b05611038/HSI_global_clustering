@@ -1,0 +1,216 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+__all__ = ['UnrolledMeanShift']
+
+
+class UnrolledMeanShift(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int = 32,
+        n_clusters: int = 64,
+        num_iters: int = 3,
+        learn_bandwidth: bool = True,
+        init_bandwidth: float = 1.0,
+        ema_decay: float = 0.95,
+        temp: float = 0.07,
+        use_approx: bool = True,
+        kernel_size: int = 5,
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.n_clusters = n_clusters
+        self.num_iters = num_iters
+        self.ema_decay = ema_decay
+        self.temp = temp
+        self.use_approx = use_approx
+        self.kernel_size = kernel_size
+
+        # bandwidth parameter (softplus)
+        if learn_bandwidth:
+            init_val = torch.log(torch.exp(torch.tensor(init_bandwidth)) - 1)
+            self.log_bandwidth = nn.Parameter(init_val)
+        else:
+            self.register_buffer('log_bandwidth', torch.log(torch.exp(torch.tensor(init_bandwidth)) - 1))
+
+        # cluster centers buffer
+        centers = torch.randn(n_clusters, embed_dim)
+        self.register_buffer('cluster_centers', F.normalize(centers, p=2, dim=1))
+
+    def forward(
+        self,
+        embeddings: torch.Tensor,
+        return_probs: bool = False,
+        return_labels: bool = False
+    ):
+
+        """
+        Args:
+            embeddings: (B, embed_dim, H, W)
+            return_probs: return soft assignment map shape (B,H,W,n_clusters)
+            return_labels: return hard label map shape (B,H,W)
+        Returns:
+            shifted embeddings, optionally (probs_map, label_map)
+        """
+        B, D, H, W = embeddings.shape
+        N = H * W
+        # flatten spatial dims
+        z = embeddings.view(B, D, N).permute(0, 2, 1)  # (B, N, D)
+
+        # compute bandwidth
+        bandwidth = F.softplus(self.log_bandwidth)
+
+        # unrolled mean-shift iterations
+        for _ in range(self.num_iters):
+            if self.use_approx:
+                # local neighbor mean-shift via unfolding
+                # embeddings: (B, D, H, W)
+                patches = F.unfold(
+                    embeddings, kernel_size=self.kernel_size,
+                    padding=self.kernel_size//2
+                )  # (B, D*K, N)
+                K = self.kernel_size * self.kernel_size
+                patches = patches.view(B, D, K, N).permute(0, 3, 2, 1)  # (B,N,K,D)
+                z_flat = z.detach()  # (B,N,D)
+                diff = patches - z_flat.unsqueeze(2)  # (B,N,K,D)
+                dist2 = (diff * diff).sum(-1)  # (B,N,K)
+                weights = torch.exp(-dist2 / (2 * bandwidth**2))  # (B,N,K)
+                # weighted update
+                numerator = (weights.unsqueeze(-1) * patches).sum(2)      # (B,N,D)
+                denom = weights.sum(2, keepdim=True) + 1e-6              # (B,N,1)
+                z = numerator / denom                                    # (B,N,D)
+            else:
+                # full pairwise
+                norm2 = (z ** 2).sum(-1, keepdim=True)
+                dist2 = norm2 + norm2.transpose(1,2) - 2*(z @ z.transpose(1,2))
+                weights = torch.exp(-dist2 / (2 * bandwidth**2))
+                z = (weights @ z) / (weights.sum(-1, keepdim=True) + 1e-6)
+
+        # normalize embeddings
+        z_normed = F.normalize(z, p=2, dim=-1)
+
+        # use cloned centers for assignment
+        centers_det = self.cluster_centers.clone()
+        sim = z_normed @ centers_det.t()  # (B, N, K)
+        probs = F.softmax(sim / self.temp, dim=-1)
+
+        labels = probs.argmax(-1).view(B, H, W) if return_labels else None
+        probs_map = probs.view(B, H, W, self.n_clusters) if return_probs else None
+
+        # EMA update of centers (no grad)
+        if self.training:
+            p_flat = probs.reshape(-1, self.n_clusters)
+            z_flat = z_normed.reshape(-1, D)
+            p_sum = p_flat.sum(dim=0)  # (K,)
+            new_centers = (p_flat.t() @ z_flat) / (p_sum.unsqueeze(1) + 1e-6)
+            with torch.no_grad():
+                updated = self.cluster_centers * self.ema_decay + new_centers * (1 - self.ema_decay)
+                updated = F.normalize(updated, p=2, dim=1)
+                self.cluster_centers.copy_(updated)
+
+        # reshape back
+        shifted = z.permute(0, 2, 1).view(B, D, H, W)
+
+        outputs = (shifted,)
+        if return_probs:
+            outputs += (probs_map,)
+        if return_labels:
+            outputs += (labels,)
+
+        return outputs[0] if len(outputs) == 1 else outputs
+
+    @property
+    def bandwidth(self) -> torch.Tensor:
+        """Current bandwidth value"""
+        return F.softplus(self.log_bandwidth)
+
+    def get_cluster_centers(self) -> torch.Tensor:
+        """Return current cluster centers (n_clusters, embed_dim)"""
+        return self.cluster_centers
+
+    def assign_clusters(self, embeddings: torch.Tensor) -> (torch.Tensor, torch.Tensor):
+        """
+        Compute soft probabilities and hard labels without updating centers.
+        Returns:
+            probs_map: (B, H, W, n_clusters)
+            labels: (B, H, W)
+        """
+        was_train = self.training
+        self.eval()
+        with torch.no_grad():
+            _, probs_map, labels = self.forward(
+                embeddings, return_probs=True, return_labels=True
+            )
+        if was_train: self.train()
+
+        return probs_map, labels
+
+    def compute_compactness_loss(
+        self,
+        z_normed: torch.Tensor,
+        probs: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compactness loss: -1/N * sum_i,k probs[i,k] * <z_i, c_k>
+        normalized_embeddings: (B, N, D), probs: (B, N, K)
+        """
+        centers_det = self.cluster_centers.clone()
+        sim = z_normed @ centers_det.t()
+        return -(probs * sim).sum() / (z_normed.numel() / z_normed.size(-1))
+
+    def compute_orthogonality_loss(self) -> torch.Tensor:
+        """
+        Orthogonality loss: sum_{i!=j} (c_i · c_j)^2
+        """
+        G = self.cluster_centers @ self.cluster_centers.t()
+        off = G - torch.eye(self.n_clusters, device=G.device)
+        return (off**2).sum()
+
+    def compute_balance_loss(
+        self,
+        probs: torch.Tensor,
+        eps: float = 1e-6
+    ) -> torch.Tensor:
+        """
+        Balance loss: sum_k bar_p_k * log(bar_p_k)
+        probs: (B, N, K)
+        """
+        bar_p = probs.mean(dim=(0,1))
+        return (bar_p * torch.log(bar_p + eps)).sum()
+
+    def compute_consistency_loss(
+        self,
+        p1: torch.Tensor,
+        p2: torch.Tensor,
+        eps: float = 1e-6
+    ) -> torch.Tensor:
+        """
+        Crop consistency: KL divergence between two soft assignments.
+        probs1, probs2: (B, N, K)
+        """
+        # flatten and add eps
+        p1 = p1.reshape(-1, self.n_clusters) + eps
+        p2 = p2.reshape(-1, self.n_clusters) + eps
+        return (p1 * (p1.log() - p2.log())).sum(dim=1).mean()
+
+    def prune_low_mass_clusters(
+        self,
+        probs: torch.Tensor,
+        threshold: float = 0.005
+    ) -> torch.Tensor:
+        """
+        Remove clusters whose average mass < threshold.
+        probs: (B, N, K)
+        Returns indices of kept clusters.
+        """
+        bar_p = probs.mean(dim=(0,1))
+        keep = bar_p >= threshold
+        new_centers = F.normalize(self.cluster_centers[keep], p=2, dim=1)
+        with torch.no_grad(): self.cluster_centers.copy_(new_centers)
+        self.n_clusters = new_centers.size(0)
+
+        return torch.nonzero(keep, as_tuple=False).view(-1)
+
+

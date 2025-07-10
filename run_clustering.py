@@ -1,0 +1,143 @@
+"""
+run_clustering.py
+
+Simple entrypoint script to train and evaluate the hyperspectral clustering model.
+"""
+import os
+import argparse
+import torch
+from torch.utils.data import DataLoader
+
+from hsi_global_clustering import (JSONMATDataset,
+                                   AugmentationPipeline,
+                                   HyperspectralClusteringModel,
+                                   HSIClusteringTrainer)
+
+from hsi_global_clustering.hsi_processing import normalize_cube
+from hsi_global_clustering.eval import iou_score, dice_score, area_rmse
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train and evaluate the HSI clustering model"
+    )
+    parser.add_argument(
+        '--mat_dir', type=str, required=True,
+        help='Directory containing .mat HSI cubes'
+    )
+    parser.add_argument(
+        '--json_dir', type=str, default=None,
+        help='Directory containing LabelMe JSON annotations'
+    )
+    parser.add_argument(
+        '--out_dir', type=str, required=True,
+        help='Directory where outputs (logs, checkpoints) will be saved'
+    )
+    parser.add_argument(
+        '--bands', type=int, default=301,
+        help='Number of spectral bands in the HSI data'
+    )
+    parser.add_argument(
+        '--crop_h', type=int, default=64,
+        help='Height of spatial crop'
+    )
+    parser.add_argument(
+        '--crop_w', type=int, default=64,
+        help='Width of spatial crop'
+    )
+    parser.add_argument(
+        '--embed_dim', type=int, default=32,
+        help='Dimension of latent embedding from the encoder'
+    )
+    parser.add_argument(
+        '--n_clusters', type=int, default=32,
+        help='Number of clusters (centroids) in the mean-shift module'
+    )
+    parser.add_argument(
+        '--num_iters', type=int, default=3,
+        help='Number of mean-shift iterations (unrolled steps)'
+    )
+    parser.add_argument(
+        '--epochs', type=int, default=50,
+        help='Total number of training epochs'
+    )
+    parser.add_argument(
+        '--batch', type=int, default=4,
+        help='Batch size (number of samples per batch)'
+    )
+    parser.add_argument(
+        '--lr', type=float, default=1e-3,
+        help='Initial learning rate for the optimizer'
+    )
+    parser.add_argument(
+        '--wd', type=float, default=1e-4,
+        help='Weight decay (L2 regularization)'
+    )
+    parser.add_argument(
+        '--device', type=str, default='cpu',
+        help='Compute device, e.g. "cuda" or "cpu"'
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    # Build training dataset
+    train_ds = JSONMATDataset(
+        mat_dir=args.mat_dir,
+        json_dir=args.json_dir,
+        data_key='cube',
+        label_key='label' if args.json_dir else None,
+        class_to_index=None if not args.json_dir else {'class0': 0, 'class1': 1},
+        transform=None,
+        normalize=normalize_cube,
+        to_tensor=True
+    )
+
+    # (Optional) build validation dataset by splitting or separate directory
+    val_ds = None
+
+    # Instantiate Trainer
+    trainer = HSIClusteringTrainer(
+        train_dataset=train_ds,
+        val_dataset=val_ds,
+        augmentor=AugmentationPipeline((args.crop_h, args.crop_w)),
+        model_kwargs={
+            'num_bands': args.bands,
+            'encoder_kwargs': {
+                'n_spectral_layers': 3,
+                'spectral_kernel_size': 3,
+                'embed_dim': args.embed_dim
+            },
+            'mean_shift_kwargs': {
+                'embed_dim': args.embed_dim,
+                'n_clusters': args.n_clusters,
+                'num_iters': args.num_iters
+            }
+        },
+        device=torch.device(args.device),
+        optimizer_kwargs={'lr': args.lr, 'weight_decay': args.wd},
+        num_epochs=args.epochs,
+        batch_size=args.batch,
+        log_dir=os.path.join(args.out_dir, 'logs'),
+        ckpt_dir=os.path.join(args.out_dir, 'checkpoints')
+    )
+
+    # Train the model
+    trainer.train()
+
+    # Inference on training set (example)
+    print("Running inference on training set...")
+    preds = trainer.inference(train_ds)
+    save_path = os.path.join(args.out_dir, 'predictions.pt')
+    torch.save(preds, save_path)
+    print(f"Saved predictions to {save_path}")
+
+    return None
+
+
+if __name__ == '__main__':
+    main()
+
+
