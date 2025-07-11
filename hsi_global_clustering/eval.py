@@ -1,36 +1,6 @@
 """
-hyperspectral_metrics.py
 
 GPU-friendly, low-RAM clustering metrics for hyperspectral image segmentations.
-
-Usage examples:
-
-    # 1) Supervised evaluation on a test HSI cube:
-    #    - Load full HSI (e.g. via HSIDataset with to_tensor=False)
-    #    - Run inference in tiles or whole-cube model:
-    full_cube = test_dataset[i]                 # (C,H,W)
-    with torch.no_grad():
-        label_map = model.inference(full_cube.unsqueeze(0))[0]  # (H,W)
-    #    - Compute IoU, Dice, Area RMSE against GT on GPU:
-    iou  = iou_score(label_map, gt_label_map)
-    dice = dice_score(label_map, gt_label_map)
-    rmse = area_rmse(label_map, gt_label_map)
-
-    # 2) Unsupervised monitoring across epochs on eval set:
-    #    - At end of epoch, run inference on each eval HSI:
-    epoch_preds = []
-    for cube in eval_dataset:
-        with torch.no_grad():
-            pm = model.inference(cube.unsqueeze(0))[0]
-        epoch_preds.append(pm.cpu())
-    #    - Compare previous and current epoch maps per image:
-    for prev, curr in zip(prev_epoch_preds, epoch_preds):
-        # cluster ID distribution entropy (collapse check)
-        ent = cluster_entropy(curr)
-        # stability via NMI or VI
-        nmi = normalized_mutual_information(prev, curr)
-        vi  = variation_of_information(prev, curr)
-        # log these scalars to TensorBoard or console
 
 Memory & VRAM considerations:
 - These metrics flatten maps via view(), so GPU memory grows linearly with pixel count (e.g. 1M pixels ⇒ ~4MB for int32 mask).  
@@ -39,6 +9,7 @@ Memory & VRAM considerations:
 - For very large H, W, you can tile label_map on CPU and call these metrics per tile, accumulating totals (IoU: sum intersections/unions; MI: sum joint counts).  
 
 All functions operate on integer label Tensors on GPU and minimize extra allocations.
+
 """
 
 import torch
@@ -165,78 +136,66 @@ def area_rmse(
 
 
 def cluster_entropy(
-    labels: Tensor,
+    labels: Tensor,      # (H,W) or (N,H,W), integer labels
     num_classes: Optional[int] = None
 ) -> Tensor:
-    """
-    Entropy H = -sum_k p_k log p_k of cluster ID distribution on GPU.
-
-    Args:
-        labels: (H,W) or (N,H,W) integer labels.
-        num_classes: total clusters; if None, inferred.
-
-    Returns:
-        scalar Tensor with entropy.
-    """
     flat = labels.view(-1)
     if num_classes is None:
         num_classes = int(flat.max()) + 1
     counts = torch.bincount(flat, minlength=num_classes).float()
     probs = counts / counts.sum()
-    mask = probs > 0
-    return -(probs[mask] * probs[mask].log()).sum()
+    nz = probs > 0
+    return -(probs[nz] * probs[nz].log()).sum()
 
 
 def mutual_information(
-    labels1: Tensor,
-    labels2: Tensor,
+    labels1: Tensor,      # (H,W) or (N,H,W), integer labels
+    labels2: Tensor,      # same shape
     num_classes: Optional[int] = None
 ) -> Tensor:
-    """
-    Mutual Information I(X;Y) on GPU.
-
-    Args:
-        labels1, labels2: (H,W) or (N,H,W) integer labels.
-        num_classes: total clusters; if None, inferred.
-
-    Returns:
-        scalar Tensor with MI.
-    """
     a = labels1.view(-1)
     b = labels2.view(-1)
     if num_classes is None:
         num_classes = int(torch.max(a.max(), b.max())) + 1
     N = a.numel()
+
+    # 1) joint histogram (flattened)
     idx = a * num_classes + b
-    joint_counts = torch.bincount(idx, minlength=num_classes*num_classes).float()
-    joint_probs = joint_counts / N
-    mask = joint_probs > 0
-    a_counts = joint_probs.sum(dim=1)
-    b_counts = joint_probs.sum(dim=0)
-    pi = a_counts.unsqueeze(1)
-    pj = b_counts.unsqueeze(0)
-    # Note: only uses masked entries to save memory
-    mi = joint_probs[mask] * (
-        torch.log(joint_probs[mask])
-        - torch.log(pi.expand_as(joint_probs)[mask])
-        - torch.log(pj.expand_as(joint_probs)[mask])
+    joint_counts = torch.bincount(idx, minlength=num_classes**2).float()
+
+    # 2) reshape into [K×K] and normalize
+    joint = joint_counts.view(num_classes, num_classes) / N
+
+    # 3) marginals
+    p_x = joint.sum(dim=1, keepdim=True)   # shape (K,1)
+    p_y = joint.sum(dim=0, keepdim=True)   # shape (1,K)
+
+    # 4) mask out zero bins and compute
+    nz = joint > 0
+    mi_terms = joint[nz] * (
+        joint[nz].log()
+        - p_x.expand_as(joint)[nz].log()
+        - p_y.expand_as(joint)[nz].log()
     )
-    return mi.sum()
+    return mi_terms.sum()
 
 
 def normalized_mutual_information(
     labels1: Tensor,
     labels2: Tensor,
-    num_classes: Optional[int] = None
+    num_classes: Optional[int] = None,
+    eps: float = 1e-12
 ) -> Tensor:
-    """
-    Normalized MI = MI / sqrt(H1*H2) on GPU.
-    """
     mi = mutual_information(labels1, labels2, num_classes)
     h1 = cluster_entropy(labels1, num_classes)
     h2 = cluster_entropy(labels2, num_classes)
-    return mi / torch.sqrt(h1 * h2)
 
+    # protect against zero‐entropy and tiny numerical overshoot
+    denom = torch.sqrt(h1 * h2).clamp_min(eps)
+    nmi = mi / denom
+
+    # clamp into [0,1]
+    return nmi.clamp(0.0, 1.0)
 
 def variation_of_information(
     labels1: Tensor,

@@ -123,8 +123,8 @@ class AugmentationPipeline:
     def __init__(
         self,
         crop_size: Tuple[int,int],
-        min_overlap: float = 0.1,
-        max_overlap: float = 0.3,
+        min_overlap: float = 0.2,
+        max_overlap: float = 0.8,
         degrees: float = 10.0,
         translate: float = 0.1,
         scale_range: Tuple[float,float] = (0.9, 1.1),

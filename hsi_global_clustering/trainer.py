@@ -74,6 +74,41 @@ def pad_and_stack(batch: list):
 
         return batch_cubes, None
 
+def print_epoch_summary(
+    epoch: int,
+    train_loss: float,
+    sup_metrics: Optional[dict] = None,
+    unsup_metrics: Optional[dict] = None,
+    total_epochs: Optional[int] = None,
+):
+    """
+    Print a concise terminal summary:
+      • epoch / total_epochs (if given)
+      • train loss
+      • IoU, Dice, RMSE (if sup_metrics)
+      • Entropy, NMI, VI (if unsup_metrics)
+    """
+    header = f"Epoch {epoch}"
+    if total_epochs:
+        header += f"/{total_epochs}"
+    parts = [header, f"TrainLoss={train_loss:.4f}"]
+
+    if sup_metrics is not None:
+        parts += [
+            f"IoU={sup_metrics['IoU']:.3f}",
+            f"Dice={sup_metrics['Dice']:.3f}",
+            f"RMSE={sup_metrics['RMSE']:.4f}",
+        ]
+
+    if unsup_metrics is not None:
+        parts += [
+            f"Ent={unsup_metrics['entropy']:.3f}",
+            f"NMI={unsup_metrics['NMI']:.3f}",
+            f"VI={unsup_metrics['VI']:.3f}",
+        ]
+
+    print(" | ".join(parts), flush=True)
+
 
 class HSIClusteringTrainer:
     """
@@ -90,6 +125,7 @@ class HSIClusteringTrainer:
         optimizer_kwargs: Dict of optimizer parameters.
         scheduler_cls: Optional learning-rate scheduler class.
         scheduler_kwargs: Dict of scheduler parameters.
+        ema_decay:     EMA decay of cluster centriod. 
         batch_size:    Number of samples per batch.
         num_workers:   DataLoader num_workers.
         num_epochs:    Total training epochs.
@@ -115,13 +151,14 @@ class HSIClusteringTrainer:
         model_kwargs: dict = {},
         device: torch.device = torch.device('cpu'),
         optimizer_cls: Callable = optim.AdamW,
-        optimizer_kwargs: dict = {'lr': 1e-3, 'weight_decay': 1e-4},
+        optimizer_kwargs: dict = {'lr': 1e-4, 'weight_decay': 1e-2},
         scheduler_cls: Optional[Callable] = None,
         scheduler_kwargs: dict = {},
+        ema_decay: float = 0.95,
         batch_size: int = 4,
         num_workers: int = 8,
         num_epochs: int = 100,
-        grad_clip: float = 1.0,
+        grad_clip: float = 1.,
         precision: str = 'bf16',
         seed: int = 42,
         log_dir: str = './runs',
@@ -166,7 +203,14 @@ class HSIClusteringTrainer:
                 collate_fn=pad_and_stack,
             )
         else:
-            self.val_loader = None
+            self.val_loader = DataLoader(
+            train_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            collate_fn=pad_and_stack,
+        )
         
         # Optimizer and optional scheduler
         self.optimizer = optimizer_cls(self.model.parameters(), **optimizer_kwargs)
@@ -174,6 +218,7 @@ class HSIClusteringTrainer:
         
         # Training settings
         self.num_epochs = num_epochs
+        self.ema_decay = ema_decay
         self.grad_clip = grad_clip
         
         # Logging and checkpointing
@@ -184,6 +229,8 @@ class HSIClusteringTrainer:
         self.save_interval = save_interval
         self.eval_interval = eval_interval
         self.log_interval = log_interval
+
+        self.prev_epoch_preds = None
         
         # Early stopping setup
         self.early_stopping = early_stopping
@@ -212,11 +259,17 @@ class HSIClusteringTrainer:
                 self.optimizer.zero_grad()
 
                 with torch.amp.autocast(device_type=self.device.type, enabled=(self.precision != 'fp32')):
-                    loss, loss_dict = self.model.train_step(c0, c1)
+                    loss, loss_dict, ema_dict = self.model.train_step(c0, c1)
 
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                 self.optimizer.step()
+
+                z1, p1 = ema_dict['z1'], ema_dict['p1']
+                z2, p2 = ema_dict['z2'], ema_dict['p2']
+
+                self._ema_update_centroids(z1, p1, z2, p2, ema_decay=self.ema_decay)
+
                 if self.scheduler:
                     self.scheduler.step()
 
@@ -230,16 +283,20 @@ class HSIClusteringTrainer:
             self.writer.add_scalar('train/total_loss', avg_loss, epoch)
 
             # Save checkpoint
-            if epoch % self.save_interval == 0:
-                path = os.path.join(self.ckpt_dir, f'epoch_{epoch}.pth')
-                self.model.save(path)
-                self.model.to(self.device)
+            if self.save_interval > 0:
+                if epoch % self.save_interval == 0:
+                    path = os.path.join(self.ckpt_dir, f'epoch_{epoch}')
+                    self.model.save(path)
+                    self.model.to(self.device)
 
             # Run evaluation
             if self.val_loader and epoch % self.eval_interval == 0:
-                self._evaluate(epoch)
-
-            print(f'Epoch progress: {epoch} / {self.num_epochs}')
+                sup_metrics, unsup_metrics = self._evaluate(epoch)
+                print_epoch_summary(epoch, 
+                                    train_loss=avg_loss,
+                                    sup_metrics=sup_metrics,
+                                    unsup_metrics=unsup_metrics,
+                                    total_epochs=self.num_epochs)
 
             # Early stopping check
             if self.early_stopping and self.es_metric:
@@ -247,9 +304,46 @@ class HSIClusteringTrainer:
                     print(f"Early stopping at epoch {epoch}")
                     break
 
+        path = os.path.join(self.ckpt_dir, 'final')
+        self.model.save(path)
+
         self.writer.close()
 
         print('HSIClustering training done !!')
+
+        return None
+
+    @torch.no_grad()
+    def _ema_update_centroids(self, z1, p1, z2, p2, ema_decay, mass_thresh=1e-3, kick_scale=0.01):
+        B, D, h, w = z1.shape
+        N = B * h * w
+        z1_flat = z1.reshape(N, D)
+        p1_flat = p1.reshape(N, self.model.cluster.n_clusters)
+        z2_flat = z2.reshape(N, D)
+        p2_flat = p2.reshape(N, self.model.cluster.n_clusters)
+    
+        # concatenate both views
+        z_cat = torch.cat([z1_flat, z2_flat], dim=0)  # (2N, D)
+        p_cat = torch.cat([p1_flat, p2_flat], dim=0)  # (2N, K)
+    
+        # weighted mean per centroid
+        mass = p_cat.sum(dim=0) + 1e-8
+        valid = mass > mass_thresh
+        new_centers = (p_cat.t() @ z_cat) / (mass.unsqueeze(1) + 1e-8)  # (K,D)
+    
+        # EMA blend
+        cc_data = self.model.cluster.cluster_centers.data        # nn.Parameter(K, D)
+        cc_data[valid] = (
+            cc_data[valid] * ema_decay +
+            new_centers[valid] * (1 - ema_decay)
+        )
+
+        # kick dead centroids with small noise
+        dead_mask  = ~valid
+        noise = torch.randn_like(cc_data, device=cc_data.device) * kick_scale
+        cc_data[dead_mask] = F.normalize(cc_data[dead_mask] + noise[dead_mask], dim=1)
+
+        self.model.cluster.cluster_centers.data = F.normalize(cc_data, p=2, dim=1)
 
         return None
 
@@ -258,42 +352,49 @@ class HSIClusteringTrainer:
         Evaluate on the validation set: compute supervised and unsupervised metrics.
         """
         self.model.eval()
-        prev_preds, curr_preds = [], []
-        sup_iou = sup_dice = sup_rmse = 0.0
-        n_sup = ent_sum = nmi_sum = vi_sum = n_unsup = 0
+        curr_epoch_preds = []
+        sup_iou = sup_dice = sup_rmse = 0.
+        n_sup = 0
 
         with torch.no_grad():
             for batch in self.val_loader:
-                cube, label = (batch if isinstance(batch, tuple) else (batch, None))
-                pred = self.model.inference(cube.to(self.device).unsqueeze(0))[0]
+                cubes, labels = batch
+                cubes = cubes.to(self.device)
+                preds = self.model.inference(cubes)[0]
+                curr_epoch_preds.append(preds.cpu())
 
-                if label is not None:
-                    label = label.to(self.device)
-                    sup_iou  += iou_score(pred, label).item()
-                    sup_dice += dice_score(pred, label).item()
-                    sup_rmse += area_rmse(pred, label).item()
+                if labels is not None:
+                    labels = labels.to(self.device)
+                    sup_iou  += iou_score(preds, labels).item()
+                    sup_dice += dice_score(preds, labels).item()
+                    sup_rmse += area_rmse(preds, labels).item()
                     n_sup   += 1
 
-                prev_preds.extend(curr_preds)
-                curr_preds = [pred.cpu()]
-
         # Log supervised metrics
-        if n_sup:
-            self.writer.add_scalar('val/IoU',  sup_iou / n_sup, epoch)
-            self.writer.add_scalar('val/Dice', sup_dice / n_sup, epoch)
-            self.writer.add_scalar('val/RMSE', sup_rmse / n_sup, epoch)
+        if labels is not None:
+            if n_sup > 0:
+                self.writer.add_scalar('val/IoU',  sup_iou / n_sup, epoch)
+                self.writer.add_scalar('val/Dice', sup_dice / n_sup, epoch)
+                self.writer.add_scalar('val/RMSE', sup_rmse / n_sup, epoch)
+
+            sup_metrics = {'IoU': sup_iou / n_sup, 
+                           'Dice': sup_dice / n_sup,
+                           'RMSE': sup_rmse / n_sup}
+        else:
+            sup_metrics = None
 
         # Log unsupervised stability
-        if prev_preds:
-            for prev, curr in zip(prev_preds, curr_preds):
+        if self.prev_epoch_preds is not None:
+            ent_sum = nmi_sum = vi_sum = count = 0
+            for prev, curr in zip(self.prev_epoch_preds, curr_epoch_preds):
                 ent_sum += cluster_entropy(curr).item()
                 nmi_sum += normalized_mutual_information(prev, curr).item()
                 vi_sum  += variation_of_information(prev, curr).item()
-                n_unsup += 1
+                count  += 1
 
-            self.writer.add_scalar('val/entropy', ent_sum / n_unsup, epoch)
-            self.writer.add_scalar('val/NMI',     nmi_sum / n_unsup, epoch)
-            self.writer.add_scalar('val/VI',      vi_sum  / n_unsup, epoch)
+            self.writer.add_scalar('val/entropy', ent_sum/count, epoch)
+            self.writer.add_scalar('val/NMI',     nmi_sum/count, epoch)
+            self.writer.add_scalar('val/VI',      vi_sum/count, epoch)
 
             # Early stop metric update
             if self.es_metric:
@@ -308,13 +409,15 @@ class HSIClusteringTrainer:
                 else:
                     self.no_improve += 1
 
-        print(
-            f"Epoch {epoch} eval: train_loss={avg_loss:.4f}, "
-            f"val_IoU={sup_iou/n_sup if n_sup else None:.3f}, "
-            f"val_NMI={nmi_sum/n_unsup if n_unsup else None:.3f}"
-        )
+            unsup_metrics = {'entropy': ent_sum/count,
+                             'NMI': nmi_sum/count,
+                             'VI': vi_sum/count}
+        else:
+            unsup_metrics = None
 
-        return None
+        self.prev_epoch_preds = curr_epoch_preds
+
+        return sup_metrics, unsup_metrics
 
     def inference(
         self,

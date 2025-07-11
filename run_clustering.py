@@ -33,6 +33,18 @@ def parse_args():
         help='Directory where outputs (logs, checkpoints) will be saved'
     )
     parser.add_argument(
+        '--full_load_ds', action='store_true',
+        help='Use the dataset with full_load flag (large RAM use but no I/O bond).'
+    )
+    parser.add_argument(
+        '--save_prediction', action='store_true',
+        help='To save the result of the prediction.'
+    )
+    parser.add_argument(
+        '--ds_n_workers', type=int, default=8,
+        help='Number of workers in Pytorch dataloader.'
+    )
+    parser.add_argument(
         '--bands', type=int, default=301,
         help='Number of spectral bands in the HSI data'
     )
@@ -53,7 +65,7 @@ def parse_args():
         help='Number of clusters (centroids) in the mean-shift module'
     )
     parser.add_argument(
-        '--num_iters', type=int, default=3,
+        '--num_iters', type=int, default=5,
         help='Number of mean-shift iterations (unrolled steps)'
     )
     parser.add_argument(
@@ -61,15 +73,15 @@ def parse_args():
         help='Total number of training epochs'
     )
     parser.add_argument(
-        '--batch', type=int, default=4,
+        '--batch', type=int, default=3,
         help='Batch size (number of samples per batch)'
     )
     parser.add_argument(
-        '--lr', type=float, default=1e-3,
+        '--lr', type=float, default=5e-4,
         help='Initial learning rate for the optimizer'
     )
     parser.add_argument(
-        '--wd', type=float, default=1e-4,
+        '--wd', type=float, default=1e-2,
         help='Weight decay (L2 regularization)'
     )
     parser.add_argument(
@@ -82,6 +94,14 @@ def parse_args():
 def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
+    full_load, num_workers = False, args.ds_n_workers
+    if args.full_load_ds:
+        full_load = True
+        num_workers = 0
+
+    save_prediction = False
+    if args.save_prediction:
+        save_prediction = True
 
     # Build training dataset
     train_ds = JSONMATDataset(
@@ -92,7 +112,8 @@ def main():
         class_to_index=None if not args.json_dir else {'class0': 0, 'class1': 1},
         transform=None,
         normalize=normalize_cube,
-        to_tensor=True
+        to_tensor=True,
+        full_loading=full_load
     )
 
     # (Optional) build validation dataset by splitting or separate directory
@@ -118,21 +139,25 @@ def main():
         },
         device=torch.device(args.device),
         optimizer_kwargs={'lr': args.lr, 'weight_decay': args.wd},
+        num_workers=num_workers,
         num_epochs=args.epochs,
         batch_size=args.batch,
         log_dir=os.path.join(args.out_dir, 'logs'),
-        ckpt_dir=os.path.join(args.out_dir, 'checkpoints')
+        ckpt_dir=os.path.join(args.out_dir, 'checkpoints'),
+        save_interval = -1,
     )
 
     # Train the model
     trainer.train()
 
     # Inference on training set (example)
-    print("Running inference on training set...")
-    preds = trainer.inference(train_ds)
-    save_path = os.path.join(args.out_dir, 'predictions.pt')
-    torch.save(preds, save_path)
-    print(f"Saved predictions to {save_path}")
+    if save_prediction:
+        # still has some bug now
+        print("Running inference on training set...")
+        preds = trainer.inference(train_ds)
+        save_path = os.path.join(args.out_dir, 'predictions.pt')
+        torch.save(preds, save_path)
+        print(f"Saved predictions to {save_path}")
 
     return None
 

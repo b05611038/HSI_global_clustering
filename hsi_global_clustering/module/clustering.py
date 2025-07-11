@@ -14,8 +14,7 @@ class UnrolledMeanShift(nn.Module):
         num_iters: int = 3,
         learn_bandwidth: bool = True,
         init_bandwidth: float = 1.0,
-        ema_decay: float = 0.95,
-        temp: float = 0.07,
+        temp: float = 0.01,
         use_approx: bool = True,
         kernel_size: int = 5,
     ):
@@ -23,7 +22,6 @@ class UnrolledMeanShift(nn.Module):
         self.embed_dim = embed_dim
         self.n_clusters = n_clusters
         self.num_iters = num_iters
-        self.ema_decay = ema_decay
         self.temp = temp
         self.use_approx = use_approx
         self.kernel_size = kernel_size
@@ -37,7 +35,7 @@ class UnrolledMeanShift(nn.Module):
 
         # cluster centers buffer
         centers = torch.randn(n_clusters, embed_dim)
-        self.register_buffer('cluster_centers', F.normalize(centers, p=2, dim=1))
+        self.cluster_centers = nn.Parameter(F.normalize(centers, p=2, dim=1))
 
     def forward(
         self,
@@ -99,26 +97,11 @@ class UnrolledMeanShift(nn.Module):
         labels = probs.argmax(-1).view(B, H, W) if return_labels else None
         probs_map = probs.view(B, H, W, self.n_clusters) if return_probs else None
 
-        # EMA update of centers (no grad)
-        if self.training:
-            p_flat = probs.reshape(-1, self.n_clusters)
-            z_flat = z_normed.reshape(-1, D)
-            p_sum = p_flat.sum(dim=0)  # (K,)
-            new_centers = (p_flat.t() @ z_flat) / (p_sum.unsqueeze(1) + 1e-6)
-            with torch.no_grad():
-                updated = self.cluster_centers * self.ema_decay + new_centers * (1 - self.ema_decay)
-                updated = F.normalize(updated, p=2, dim=1)
-                self.cluster_centers.copy_(updated)
-
         # reshape back
         shifted = z.permute(0, 2, 1).view(B, D, H, W)
-
         outputs = (shifted,)
-        if return_probs:
-            outputs += (probs_map,)
-        if return_labels:
-            outputs += (labels,)
-
+        if return_probs:    outputs += (probs_map,)
+        if return_labels:   outputs += (labels,)
         return outputs[0] if len(outputs) == 1 else outputs
 
     @property
@@ -153,12 +136,16 @@ class UnrolledMeanShift(nn.Module):
         probs: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compactness loss: -1/N * sum_i,k probs[i,k] * <z_i, c_k>
-        normalized_embeddings: (B, N, D), probs: (B, N, K)
+        Compactness loss: 1/N * sum_{i,k} probs[i,k] * (1 - cosine(z_i, c_k))
+        z_normed: (B, N, D), probs: (B, N, K)
         """
-        centers_det = self.cluster_centers.clone()
-        sim = z_normed @ centers_det.t()
-        return -(probs * sim).sum() / (z_normed.numel() / z_normed.size(-1))
+        B, N, D = z_normed.shape
+        # Compute cosine similarities (B, N, K)
+        sim = torch.matmul(z_normed, self.cluster_centers.t())
+        # Convert to distance in [0,2]
+        dist = (1.0 - sim).clamp(min=0.0)
+        # Weighted average
+        return (probs * dist).sum() / (B * N)
 
     def compute_orthogonality_loss(self) -> torch.Tensor:
         """
@@ -168,17 +155,50 @@ class UnrolledMeanShift(nn.Module):
         off = G - torch.eye(self.n_clusters, device=G.device)
         return (off**2).sum()
 
-    def compute_balance_loss(
+    def compute_balance_loss(self, probs: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+        """
+        Balance loss: - sum_k bar_p_k * log(bar_p_k)
+        Encourages uniform cluster usage.
+        probs: (B, N, K)
+        """
+        bar_p = probs.mean(dim=(0,1)) + eps   # marginal cluster distribution
+        return - (bar_p * torch.log(bar_p)).sum()
+
+    def compute_uniform_assignment_loss(
         self,
         probs: torch.Tensor,
         eps: float = 1e-6
     ) -> torch.Tensor:
         """
-        Balance loss: sum_k bar_p_k * log(bar_p_k)
-        probs: (B, N, K)
+        Uniform-assignment cross-entropy: build pseudo-labels that
+        assign exactly M/K pixels to each of the K clusters, then
+        compute the CE against the model’s soft assignments.
+        Input:
+          probs: (B, N, K)
+        Output:
+          scalar loss
         """
-        bar_p = probs.mean(dim=(0,1))
-        return (bar_p * torch.log(bar_p + eps)).sum()
+        B, N, K = probs.shape
+        M = B * N
+
+        # flatten to (M, K)
+        p_flat = probs.reshape(M, K).clamp(min=eps)
+        log_p  = torch.log(p_flat)
+
+        # build uniform pseudo‐labels:
+        #   exactly floor(M/K) of each class, plus any extras
+        base   = M // K
+        labels = torch.arange(K, device=probs.device).repeat_interleave(base)
+        extras = M - labels.numel()
+        if extras > 0:
+            labels = torch.cat([labels, torch.arange(extras, device=probs.device)], dim=0)
+
+        # shuffle so they're randomly distributed
+        perm   = torch.randperm(M, device=probs.device)
+        labels = labels[perm]       # shape (M,)
+
+        # negative log‐likelihood
+        return F.nll_loss(log_p, labels)
 
     def compute_consistency_loss(
         self,
@@ -187,13 +207,16 @@ class UnrolledMeanShift(nn.Module):
         eps: float = 1e-6
     ) -> torch.Tensor:
         """
-        Crop consistency: KL divergence between two soft assignments.
+        Symmetric consistency loss: 0.5 * (KL(p1||p2) + KL(p2||p1)).
         probs1, probs2: (B, N, K)
         """
-        # flatten and add eps
-        p1 = p1.reshape(-1, self.n_clusters) + eps
-        p2 = p2.reshape(-1, self.n_clusters) + eps
-        return (p1 * (p1.log() - p2.log())).sum(dim=1).mean()
+        # flatten both to (N, K) and add eps
+        p1_flat = p1.reshape(-1, self.n_clusters) + eps
+        p2_flat = p2.reshape(-1, self.n_clusters) + eps
+
+        kl12 = (p1_flat * (p1_flat.log() - p2_flat.log())).sum(dim=1)
+        kl21 = (p2_flat * (p2_flat.log() - p1_flat.log())).sum(dim=1)
+        return 0.5 * (kl12 + kl21).mean()
 
     def prune_low_mass_clusters(
         self,

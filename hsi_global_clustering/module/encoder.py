@@ -9,7 +9,7 @@ class HyperspectralEncoder(nn.Module):
         self,
         num_bands: int,
         n_spectral_layers: int = 3,
-        spectral_kernel_size: int = 3,
+        spectral_kernel_size: int = 9,
         embed_dim: int = 32,
         inplace: bool = False,
     ):
@@ -51,8 +51,8 @@ class HyperspectralEncoder(nn.Module):
                 out_channels=embed_dim,
                 kernel_size=3,
                 stride=1,
-                padding=2,
-                dilation=2,
+                padding=1,
+                dilation=1,
                 bias=False,
             )
         )

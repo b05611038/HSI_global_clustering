@@ -25,7 +25,7 @@ class HyperspectralClusteringModel(nn.Module):
         encoder_kwargs = encoder_kwargs or {}
         mean_shift_kwargs = mean_shift_kwargs or {}
         # default loss weights
-        lw = {'orth': 1.0, 'bal': 0.5, 'cons': 1.0}
+        lw = {'orth': 1e-3, 'bal': 1.0, 'unif': 1.0, 'cons': 1.0}
         if loss_weights:
             lw.update(loss_weights)
 
@@ -34,6 +34,7 @@ class HyperspectralClusteringModel(nn.Module):
         self.cluster = UnrolledMeanShift(**mean_shift_kwargs)
 
         # loss lambdas
+        self.lambda_unif = lw['unif']
         self.lambda_orth = lw['orth']
         self.lambda_bal = lw['bal']
         self.lambda_cons = lw['cons']
@@ -70,20 +71,33 @@ class HyperspectralClusteringModel(nn.Module):
         # losses
         comp1 = self.cluster.compute_compactness_loss(z1_flat, p1_flat)
         comp2 = self.cluster.compute_compactness_loss(z2_flat, p2_flat)
+        unif1 = self.cluster.compute_uniform_assignment_loss(p1_flat)
+        unif2 = self.cluster.compute_uniform_assignment_loss(p2_flat)
+        unif  = (unif1 + unif2) / 2
         orth  = self.cluster.compute_orthogonality_loss()
-        bal   = self.cluster.compute_balance_loss(p1_flat)
+        bal1  = self.cluster.compute_balance_loss(p1_flat)
+        bal2  = self.cluster.compute_balance_loss(p2_flat)
+        bal   = (bal1 + bal2) / 2
         cons  = self.cluster.compute_consistency_loss(p1_flat, p2_flat)
-        total = comp1 + comp2 + self.lambda_orth*orth + self.lambda_bal*bal + self.lambda_cons*cons
+        total = comp1 + comp2 + self.lambda_unif*unif + self.lambda_orth*orth + self.lambda_bal*bal + self.lambda_cons*cons
 
-        return total, {'comp1': comp1, 'comp2': comp2, 'orth': orth, 'bal': bal, 'cons': cons}
+        loss_dict = {'comp1': comp1, 'comp2': comp2, 'unif': unif, 'orth': orth, 'bal': bal, 'cons': cons}
+        ema_dict = {'z1': shifted1, 'p1': p1, 'z2': shifted2, 'p2': p2}
+
+        return total, loss_dict, ema_dict
 
     @torch.no_grad()
     def inference(self, x: torch.Tensor) -> torch.Tensor:
         """
         Run full-cube inference, returning hard cluster labels per pixel.
         """
+        was_train = self.training
+        self.eval()
+
         embeds = self.encoder(x)
         _, labels = self.cluster(embeds, return_labels=True)
+
+        if was_train: self.train()
 
         return labels
 
