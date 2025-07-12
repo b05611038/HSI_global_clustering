@@ -5,8 +5,8 @@ Simple entrypoint script to train and evaluate the hyperspectral clustering mode
 """
 import os
 import argparse
+
 import torch
-from torch.utils.data import DataLoader
 
 from hsi_global_clustering import (JSONMATDataset,
                                    AugmentationPipeline,
@@ -14,7 +14,6 @@ from hsi_global_clustering import (JSONMATDataset,
                                    HSIClusteringTrainer)
 
 from hsi_global_clustering.hsi_processing import normalize_cube
-from hsi_global_clustering.eval import iou_score, dice_score, area_rmse
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -61,7 +60,7 @@ def parse_args():
         help='Dimension of latent embedding from the encoder'
     )
     parser.add_argument(
-        '--n_clusters', type=int, default=32,
+        '--n_clusters', type=int, default=4,
         help='Number of clusters (centroids) in the mean-shift module'
     )
     parser.add_argument(
@@ -73,11 +72,11 @@ def parse_args():
         help='Total number of training epochs'
     )
     parser.add_argument(
-        '--batch', type=int, default=3,
+        '--batch', type=int, default=4,
         help='Batch size (number of samples per batch)'
     )
     parser.add_argument(
-        '--lr', type=float, default=5e-4,
+        '--lr', type=float, default=1e-4,
         help='Initial learning rate for the optimizer'
     )
     parser.add_argument(
@@ -128,7 +127,7 @@ def main():
             'num_bands': args.bands,
             'encoder_kwargs': {
                 'n_spectral_layers': 3,
-                'spectral_kernel_size': 3,
+                'spectral_kernel_size': 9,
                 'embed_dim': args.embed_dim
             },
             'mean_shift_kwargs': {

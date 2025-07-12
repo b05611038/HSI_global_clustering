@@ -10,7 +10,7 @@ class UnrolledMeanShift(nn.Module):
     def __init__(
         self,
         embed_dim: int = 32,
-        n_clusters: int = 64,
+        n_clusters: int = 4,
         num_iters: int = 3,
         learn_bandwidth: bool = True,
         init_bandwidth: float = 1.0,
@@ -22,6 +22,7 @@ class UnrolledMeanShift(nn.Module):
         self.embed_dim = embed_dim
         self.n_clusters = n_clusters
         self.num_iters = num_iters
+        self.learn_bandwidth = learn_bandwidth
         self.temp = temp
         self.use_approx = use_approx
         self.kernel_size = kernel_size

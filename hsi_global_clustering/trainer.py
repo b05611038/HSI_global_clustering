@@ -426,7 +426,7 @@ class HSIClusteringTrainer:
         num_workers: Optional[int] = None,
         pin_memory: bool = True,
         auto_align: bool = True
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, float]]]:
+    ):
         """
         Run inference on arbitrary-size cubes.
 

@@ -15,6 +15,13 @@ class HyperspectralEncoder(nn.Module):
     ):
         super().__init__()
         # ---- 1D spectral CNN stack ----
+
+        self.num_bands = num_bands
+        self.n_spectral_layers = n_spectral_layers
+        self.spectral_kernel_size = spectral_kernel_size
+        self.embed_dim = embed_dim
+        self.inplace = inplace
+
         layers = []
         for i in range(n_spectral_layers):
             in_channels = num_bands if i == 0 else embed_dim

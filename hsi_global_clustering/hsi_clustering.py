@@ -1,3 +1,6 @@
+import os
+import json
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,27 +19,34 @@ class HyperspectralClusteringModel(nn.Module):
     """
     def __init__(
         self,
-        num_bands: int,
+        num_bands: int = 301,
         encoder_kwargs: dict = None,
         mean_shift_kwargs: dict = None,
         loss_weights: dict = None,
     ):
         super().__init__()
-        encoder_kwargs = encoder_kwargs or {}
-        mean_shift_kwargs = mean_shift_kwargs or {}
-        # default loss weights
-        lw = {'orth': 1e-3, 'bal': 1.0, 'unif': 1.0, 'cons': 1.0}
-        if loss_weights:
-            lw.update(loss_weights)
 
-        # modules
-        self.encoder = HyperspectralEncoder(num_bands, **encoder_kwargs)
-        self.cluster = UnrolledMeanShift(**mean_shift_kwargs)
+        self._init_args = {
+            "num_bands":         num_bands,
+            "encoder_kwargs":    encoder_kwargs    or {},
+            "mean_shift_kwargs": mean_shift_kwargs or {},
+            "loss_weights":      loss_weights      or {},
+        }
 
-        # loss lambdas
-        self.lambda_unif = lw['unif']
+        # build submodules as before
+        self.encoder = HyperspectralEncoder(
+            num_bands, **self._init_args["encoder_kwargs"]
+        )
+        self.cluster = UnrolledMeanShift(
+            **self._init_args["mean_shift_kwargs"]
+        )
+
+        # unpack loss‐weights
+        lw = {'orth':1e-5,'bal':2.0,'unif':2.0,'cons':1.0}
+        lw.update(self._init_args["loss_weights"])
         self.lambda_orth = lw['orth']
-        self.lambda_bal = lw['bal']
+        self.lambda_bal  = lw['bal']
+        self.lambda_unif = lw['unif']
         self.lambda_cons = lw['cons']
 
     def forward(self, x: torch.Tensor, return_probs: bool = False, return_labels: bool = False):
@@ -103,17 +113,54 @@ class HyperspectralClusteringModel(nn.Module):
 
     def save(self, path: str):
         """
-        Save model state_dict to a safetensors file.
+        path: directory in which to write
+          - path/config.json
+          - path/weights.safetensors
         """
-        save_as_safetensors(self.state_dict(), path)
+        # 1) make sure the directory exists
+        os.makedirs(path, exist_ok=True)
 
+        # 2) dump the init args
+        cfg_path = os.path.join(path, "config.json")
+        with open(cfg_path, "w") as f:
+            json.dump(self._init_args, f, indent=2)
+
+        # 3) dump the weights
+        weights_path = os.path.join(path, "weights.safetensors")
+        # if you use safetensors helper:
+        save_as_safetensors(self.state_dict(), weights_path)
         return None
     
     @classmethod
-    def load(cls, path: str, device: str='cpu', **model_kwargs) -> 'HyperspectralClusteringModel':
-        tensors = load_safetensors(path, device=device)
-        model = cls(**model_kwargs)
+    def load(
+        cls,
+        path: str,
+        device: str = "cpu",
+        **override_init_args
+    ) -> "HyperspectralClusteringModel":
+        """
+        path: directory containing
+          - path/config.json
+          - path/weights.safetensors
+
+        override_init_args: if you want to tweak any of the recorded init params
+        """
+        # 1) read config
+        cfg_path = os.path.join(path, "config.json")
+        with open(cfg_path, "r") as f:
+            init_args = json.load(f)
+
+        # 2) apply overrides (e.g. bands=…, mean_shift_kwargs=…)
+        init_args.update(override_init_args)
+
+        # 3) build the model
+        model = cls(**init_args)
+
+        # 4) load the weights
+        weights_path = os.path.join(path, "weights.safetensors")
+        tensors = load_safetensors(weights_path, device=device)
         model.load_state_dict(tensors)
-        model.to(device)
-        return model
+
+        return model.to(device)
+
 
