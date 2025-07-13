@@ -46,18 +46,6 @@ def parse_args():
         help='Number of workers in Pytorch dataloader.'
     )
     parser.add_argument(
-        '--bands', type=int, default=301,
-        help='Number of spectral bands in the HSI data'
-    )
-    parser.add_argument(
-        '--embed_dim', type=int, default=32,
-        help='Dimension of latent embedding from the encoder'
-    )
-    parser.add_argument(
-        '--n_clusters', type=int, default=4,
-        help='Number of clusters (centroids) in the mean-shift module'
-    )
-    parser.add_argument(
         '--device', type=str, default='cpu',
         help='Compute device, e.g. "cuda" or "cpu"'
     )
@@ -160,20 +148,20 @@ def main():
             img_dir = args.img_dir
 
     device = torch.device(args.device)
-    model = HyperspectralClusteringModel(
-        args.bands,
-        encoder_kwargs={
-            'n_spectral_layers': 3,
-            'spectral_kernel_size': 9,
-            'embed_dim': args.embed_dim
-        },
-        mean_shift_kwargs={
-            'embed_dim': args.embed_dim,
-            'n_clusters': args.n_clusters,
-            'num_iters': 5
-        }
-    )
-    model = model.load(args.checkpoint_path)
+    # model = HyperspectralClusteringModel(
+    #     args.bands,
+    #     encoder_kwargs={
+    #         'n_spectral_layers': 3,
+    #         'spectral_kernel_size': 9,
+    #         'embed_dim': args.embed_dim
+    #     },
+    #     mean_shift_kwargs={
+    #         'embed_dim': args.embed_dim,
+    #         'n_clusters': args.n_clusters,
+    #         'num_iters': 5
+    #     }
+    # )
+    model = HyperspectralClusteringModel.load(args.checkpoint_path)
 
     eval_ds = JSONMATDataset(
         mat_dir=args.mat_dir,

@@ -44,9 +44,9 @@ class HyperspectralEncoder(nn.Module):
             nn.Conv2d(
                 in_channels=embed_dim,
                 out_channels=embed_dim,
-                kernel_size=3,
+                kernel_size=(3, 1),
                 stride=1,
-                padding=1,
+                padding=(1, 0),
                 dilation=1,
                 bias=False,
             )
@@ -56,9 +56,9 @@ class HyperspectralEncoder(nn.Module):
             nn.Conv2d(
                 in_channels=embed_dim,
                 out_channels=embed_dim,
-                kernel_size=3,
+                kernel_size=(1, 3),
                 stride=1,
-                padding=1,
+                padding=(0, 1),
                 dilation=1,
                 bias=False,
             )

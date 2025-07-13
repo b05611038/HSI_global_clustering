@@ -165,7 +165,7 @@ class HSIClusteringTrainer:
         ckpt_dir: str = './checkpoints',
         save_interval: int = 1,
         eval_interval: int = 1,
-        log_interval: int = 50,
+        log_interval: int = 10,
         early_stopping: bool = False,
         early_stopping_patience: int = 10,
         early_stopping_metric: Optional[Callable[[Dict[str, float]], float]] = None,
@@ -314,7 +314,8 @@ class HSIClusteringTrainer:
         return None
 
     @torch.no_grad()
-    def _ema_update_centroids(self, z1, p1, z2, p2, ema_decay, mass_thresh=1e-3, kick_scale=0.01):
+    def _ema_update_centroids(self, z1, p1, z2, p2, ema_decay, 
+                              mass_thresh=1e-3, kick_scale=5e-2, eps=1e-6):
         B, D, h, w = z1.shape
         N = B * h * w
         z1_flat = z1.reshape(N, D)
@@ -329,7 +330,7 @@ class HSIClusteringTrainer:
         # weighted mean per centroid
         mass = p_cat.sum(dim=0) + 1e-8
         valid = mass > mass_thresh
-        new_centers = (p_cat.t() @ z_cat) / (mass.unsqueeze(1) + 1e-8)  # (K,D)
+        new_centers = (p_cat.t() @ z_cat) / (mass.unsqueeze(1) + eps)  # (K,D)
     
         # EMA blend
         cc_data = self.model.cluster.cluster_centers.data        # nn.Parameter(K, D)

@@ -12,7 +12,6 @@ from torch.utils.data import Dataset
 from PIL import Image, ImageDraw
 
 
-
 __all__ = ['JSONMATDataset']
 
 

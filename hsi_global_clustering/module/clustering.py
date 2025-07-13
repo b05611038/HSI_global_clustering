@@ -11,7 +11,7 @@ class UnrolledMeanShift(nn.Module):
         self,
         embed_dim: int = 32,
         n_clusters: int = 4,
-        num_iters: int = 3,
+        num_iters: int = 5,
         learn_bandwidth: bool = True,
         init_bandwidth: float = 1.0,
         temp: float = 0.01,
@@ -41,6 +41,7 @@ class UnrolledMeanShift(nn.Module):
     def forward(
         self,
         embeddings: torch.Tensor,
+        eps: float = 1e-6,
         return_probs: bool = False,
         return_labels: bool = False
     ):
@@ -78,14 +79,14 @@ class UnrolledMeanShift(nn.Module):
                 weights = torch.exp(-dist2 / (2 * bandwidth**2))  # (B,N,K)
                 # weighted update
                 numerator = (weights.unsqueeze(-1) * patches).sum(2)      # (B,N,D)
-                denom = weights.sum(2, keepdim=True) + 1e-6              # (B,N,1)
+                denom = weights.sum(2, keepdim=True) + eps               # (B,N,1)
                 z = numerator / denom                                    # (B,N,D)
             else:
                 # full pairwise
                 norm2 = (z ** 2).sum(-1, keepdim=True)
                 dist2 = norm2 + norm2.transpose(1,2) - 2*(z @ z.transpose(1,2))
                 weights = torch.exp(-dist2 / (2 * bandwidth**2))
-                z = (weights @ z) / (weights.sum(-1, keepdim=True) + 1e-6)
+                z = (weights @ z) / (weights.sum(-1, keepdim=True) + eps)
 
         # normalize embeddings
         z_normed = F.normalize(z, p=2, dim=-1)

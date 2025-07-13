@@ -42,7 +42,7 @@ class HyperspectralClusteringModel(nn.Module):
         )
 
         # unpack loss‐weights
-        lw = {'orth':1e-5,'bal':2.0,'unif':2.0,'cons':1.0}
+        lw = {'orth':1e-5,'bal':1.0,'unif':1.0,'cons':1.0}
         lw.update(self._init_args["loss_weights"])
         self.lambda_orth = lw['orth']
         self.lambda_bal  = lw['bal']

@@ -68,16 +68,48 @@ def parse_args():
         help='Number of mean-shift iterations (unrolled steps)'
     )
     parser.add_argument(
+        '--ema_decay', type=float, default=0.95,
+        help='EMA decay of cluster centroid moving.'
+    )
+    parser.add_argument(
         '--epochs', type=int, default=50,
         help='Total number of training epochs'
+    )
+    parser.add_argument(
+        '--save_interval', type=int, default=5,
+        help='Interval of saving cluster model'
     )
     parser.add_argument(
         '--batch', type=int, default=4,
         help='Batch size (number of samples per batch)'
     )
     parser.add_argument(
+        '--coef_orth', type=float, default=1e-5,
+        help='Coefficient of orthogonal centroid panelization in loss fuction.'
+    )
+    parser.add_argument(
+        '--coef_bal', type=float, default=1.0,
+        help='Coefficient of balanced cluster usage in loss function.',
+    )
+    parser.add_argument(
+        '--coef_unif', type=float, default=1.0,
+        help='Coefficient of uniformly assign cluster in loss function.',
+    )
+    parser.add_argument(
+        '--coef_cons', type=float, default=1.0,
+        help='Coefficient of panelizing inconsistent of two cropped HSI in loss function.',
+    )
+    parser.add_argument(
         '--lr', type=float, default=1e-4,
         help='Initial learning rate for the optimizer'
+    )
+    parser.add_argument(
+        '--beta1', type=float, default=0.9,
+        help='Beta1 of AdamW.'
+    )
+    parser.add_argument(
+        '--beta2', type=float, default=0.999,
+        help='Beta1 of AdamW.'
     )
     parser.add_argument(
         '--wd', type=float, default=1e-2,
@@ -134,16 +166,23 @@ def main():
                 'embed_dim': args.embed_dim,
                 'n_clusters': args.n_clusters,
                 'num_iters': args.num_iters
-            }
+            },
+            'loss_weights': {
+                'orth': args.coef_orth,
+                'bal': args.coef_bal,
+                'unif': args.coef_unif,
+                'cons': args.coef_cons,
+            },
         },
         device=torch.device(args.device),
-        optimizer_kwargs={'lr': args.lr, 'weight_decay': args.wd},
+        optimizer_kwargs={'lr': args.lr, 'betas': (args.beta1, args.beta2), 'weight_decay': args.wd},
+        ema_decay=args.ema_decay,
         num_workers=num_workers,
         num_epochs=args.epochs,
         batch_size=args.batch,
         log_dir=os.path.join(args.out_dir, 'logs'),
         ckpt_dir=os.path.join(args.out_dir, 'checkpoints'),
-        save_interval = -1,
+        save_interval = args.save_interval,
     )
 
     # Train the model
@@ -154,7 +193,7 @@ def main():
         # still has some bug now
         print("Running inference on training set...")
         preds = trainer.inference(train_ds)
-        save_path = os.path.join(args.out_dir, 'predictions.pt')
+        save_path = os.path.join(args.out_dir, 'predictions.pth')
         torch.save(preds, save_path)
         print(f"Saved predictions to {save_path}")
 
