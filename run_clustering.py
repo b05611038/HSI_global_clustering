@@ -72,11 +72,11 @@ def parse_args():
         help='EMA decay of cluster centroid moving.'
     )
     parser.add_argument(
-        '--epochs', type=int, default=50,
+        '--epochs', type=int, default=10,
         help='Total number of training epochs'
     )
     parser.add_argument(
-        '--save_interval', type=int, default=5,
+        '--save_interval', type=int, default=2,
         help='Interval of saving cluster model'
     )
     parser.add_argument(
@@ -84,7 +84,11 @@ def parse_args():
         help='Batch size (number of samples per batch)'
     )
     parser.add_argument(
-        '--coef_orth', type=float, default=1e-5,
+        '--reuse_iter', type=int, default=10,
+        help='Repeated use in a single HSI acquistion.'
+    )
+    parser.add_argument(
+        '--coef_orth', type=float, default=0.1,
         help='Coefficient of orthogonal centroid panelization in loss fuction.'
     )
     parser.add_argument(
@@ -160,7 +164,8 @@ def main():
             'encoder_kwargs': {
                 'n_spectral_layers': 3,
                 'spectral_kernel_size': 9,
-                'embed_dim': args.embed_dim
+                'embed_dim': args.embed_dim,
+                'bias': True
             },
             'mean_shift_kwargs': {
                 'embed_dim': args.embed_dim,
@@ -179,6 +184,7 @@ def main():
         ema_decay=args.ema_decay,
         num_workers=num_workers,
         num_epochs=args.epochs,
+        reuse_iter=args.reuse_iter,
         batch_size=args.batch,
         log_dir=os.path.join(args.out_dir, 'logs'),
         ckpt_dir=os.path.join(args.out_dir, 'checkpoints'),

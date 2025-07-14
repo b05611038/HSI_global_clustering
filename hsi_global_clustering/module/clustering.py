@@ -14,7 +14,7 @@ class UnrolledMeanShift(nn.Module):
         num_iters: int = 5,
         learn_bandwidth: bool = True,
         init_bandwidth: float = 1.0,
-        temp: float = 0.01,
+        temp: float = 0.05,
         use_approx: bool = True,
         kernel_size: int = 5,
     ):

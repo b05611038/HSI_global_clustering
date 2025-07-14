@@ -148,19 +148,6 @@ def main():
             img_dir = args.img_dir
 
     device = torch.device(args.device)
-    # model = HyperspectralClusteringModel(
-    #     args.bands,
-    #     encoder_kwargs={
-    #         'n_spectral_layers': 3,
-    #         'spectral_kernel_size': 9,
-    #         'embed_dim': args.embed_dim
-    #     },
-    #     mean_shift_kwargs={
-    #         'embed_dim': args.embed_dim,
-    #         'n_clusters': args.n_clusters,
-    #         'num_iters': 5
-    #     }
-    # )
     model = HyperspectralClusteringModel.load(args.checkpoint_path)
 
     eval_ds = JSONMATDataset(

@@ -74,6 +74,58 @@ def pad_and_stack(batch: list):
 
         return batch_cubes, None
 
+def crop_and_stack(batch: list):
+    """
+    Crop a batch of cubes (and optional labels) to the same H_min x W_min, then stack.
+
+    Args:
+      batch: list of items, each either
+             - Tensor(C, H, W)
+             - or (Tensor(C, H, W), Tensor(H, W))
+    Returns:
+      cubes:  Tensor(B, C, H_min, W_min)
+      labels: Tensor(B, H_min, W_min) if labels present else None
+    """
+    has_labels = isinstance(batch[0], tuple)
+    cubes = []
+    labels = [] if has_labels else None
+    for item in batch:
+        if has_labels:
+            c, l = item
+            cubes.append(c)
+            labels.append(l)
+        else:
+            cubes.append(item)
+
+    # compute minimum dims
+    hs = [c.shape[1] for c in cubes]
+    ws = [c.shape[2] for c in cubes]
+    H_min, W_min = min(hs), min(ws)
+
+    # center‐crop each cube
+    cropped_cubes = []
+    for c in cubes:
+        C, h, w = c.shape
+        top  = (h - H_min) // 2
+        left = (w - W_min) // 2
+        cropped = c[:, top : top + H_min, left : left + W_min]
+        cropped_cubes.append(cropped)
+    batch_cubes = torch.stack(cropped_cubes, dim=0)
+
+    # center‐crop labels if present
+    if has_labels:
+        cropped_labels = []
+        for l in labels:  # each l is (H, W)
+            h, w = l.shape
+            top  = (h - H_min) // 2
+            left = (w - W_min) // 2
+            cropped_l = l[top : top + H_min, left : left + W_min]
+            cropped_labels.append(cropped_l)
+        batch_labels = torch.stack(cropped_labels, dim=0)
+        return batch_cubes, batch_labels
+
+    return batch_cubes, None
+
 def print_epoch_summary(
     epoch: int,
     train_loss: float,
@@ -129,6 +181,7 @@ class HSIClusteringTrainer:
         batch_size:    Number of samples per batch.
         num_workers:   DataLoader num_workers.
         num_epochs:    Total training epochs.
+        reuse_iter:    Resample times of single HSI cube acqusition.
         grad_clip:     Gradient clipping norm.
         precision:     'fp32' or 'bf16' for mixed precision.
         seed:          Random seed.
@@ -151,14 +204,15 @@ class HSIClusteringTrainer:
         model_kwargs: dict = {},
         device: torch.device = torch.device('cpu'),
         optimizer_cls: Callable = optim.AdamW,
-        optimizer_kwargs: dict = {'lr': 1e-4, 'weight_decay': 1e-2},
+        optimizer_kwargs: dict = {'lr': 1e-4},
         scheduler_cls: Optional[Callable] = None,
         scheduler_kwargs: dict = {},
         ema_decay: float = 0.95,
         batch_size: int = 4,
         num_workers: int = 8,
-        num_epochs: int = 100,
-        grad_clip: float = 1.,
+        num_epochs: int = 10,
+        reuse_iter: int = 10,
+        grad_clip: float = 1.0,
         precision: str = 'bf16',
         seed: int = 42,
         log_dir: str = './runs',
@@ -209,7 +263,7 @@ class HSIClusteringTrainer:
             shuffle=False,
             num_workers=num_workers,
             pin_memory=True,
-            collate_fn=pad_and_stack,
+            collate_fn=crop_and_stack,
         )
         
         # Optimizer and optional scheduler
@@ -218,6 +272,7 @@ class HSIClusteringTrainer:
         
         # Training settings
         self.num_epochs = num_epochs
+        self.reuse_iter = reuse_iter
         self.ema_decay = ema_decay
         self.grad_clip = grad_clip
         
@@ -249,37 +304,39 @@ class HSIClusteringTrainer:
 
             for step, batch in enumerate(self.train_loader, start=1):
                 cubes, _ = batch
-
                 cubes = cubes.to(self.device, non_blocking=True)        # (B, C, H, W)
-                crops = self.augmentor(cubes)                           # (B, 2, C, h, w)
+                for reuse_step in range(1, self.reuse_iter + 1):
+                    crops = self.augmentor(cubes)                       # (B, 2, C, h, w)
 
-                c0 = crops[:, 0]
-                c1 = crops[:, 1]
+                    c0 = crops[:, 0]
+                    c1 = crops[:, 1]
 
-                self.optimizer.zero_grad()
+                    self.optimizer.zero_grad()
 
-                with torch.amp.autocast(device_type=self.device.type, enabled=(self.precision != 'fp32')):
-                    loss, loss_dict, ema_dict = self.model.train_step(c0, c1)
+                    with torch.amp.autocast(device_type=self.device.type, enabled=(self.precision != 'fp32')):
+                        loss, loss_dict, ema_dict = self.model.train_step(c0, c1)
 
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-                self.optimizer.step()
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                    self.optimizer.step()
 
-                z1, p1 = ema_dict['z1'], ema_dict['p1']
-                z2, p2 = ema_dict['z2'], ema_dict['p2']
+                    z1, p1 = ema_dict['z1'], ema_dict['p1']
+                    z2, p2 = ema_dict['z2'], ema_dict['p2']
 
-                self._ema_update_centroids(z1, p1, z2, p2, ema_decay=self.ema_decay)
+                    self._ema_update_centroids(z1, p1, z2, p2, ema_decay=self.ema_decay)
 
-                if self.scheduler:
-                    self.scheduler.step()
+                    if self.scheduler:
+                        self.scheduler.step()
 
-                running_loss += loss.item()
-                if step % self.log_interval == 0:
-                    for name, val in loss_dict.items():
-                        self.writer.add_scalar(f'train/{name}', val.item(), epoch * len(self.train_loader) + step)
+                    running_loss += loss.item()
+                    if step % self.log_interval == 0:
+                        for name, val in loss_dict.items():
+                            record_iter = epoch * len(self.train_loader) * self.reuse_iter + \
+                                    (step - 1) * self.reuse_iter + reuse_step
+                            self.writer.add_scalar(f'train/{name}', val.item(), record_iter) 
 
             # epoch end
-            avg_loss = running_loss / len(self.train_loader)
+            avg_loss = running_loss / (len(self.train_loader) * self.reuse_iter)
             self.writer.add_scalar('train/total_loss', avg_loss, epoch)
 
             # Save checkpoint
@@ -315,7 +372,7 @@ class HSIClusteringTrainer:
 
     @torch.no_grad()
     def _ema_update_centroids(self, z1, p1, z2, p2, ema_decay, 
-                              mass_thresh=1e-3, kick_scale=5e-2, eps=1e-6):
+                              mass_thresh=1e-3, kick_scale=0.01, eps=1e-6):
         B, D, h, w = z1.shape
         N = B * h * w
         z1_flat = z1.reshape(N, D)

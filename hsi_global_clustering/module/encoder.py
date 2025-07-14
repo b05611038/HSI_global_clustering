@@ -9,8 +9,9 @@ class HyperspectralEncoder(nn.Module):
         self,
         num_bands: int,
         n_spectral_layers: int = 3,
-        spectral_kernel_size: int = 9,
+        spectral_kernel_size: int = 3,
         embed_dim: int = 32,
+        bias: bool = True,
         inplace: bool = False,
     ):
         super().__init__()
@@ -20,6 +21,7 @@ class HyperspectralEncoder(nn.Module):
         self.n_spectral_layers = n_spectral_layers
         self.spectral_kernel_size = spectral_kernel_size
         self.embed_dim = embed_dim
+        self.bias = bias
         self.inplace = inplace
 
         layers = []
@@ -31,7 +33,7 @@ class HyperspectralEncoder(nn.Module):
                     out_channels=embed_dim,
                     kernel_size=spectral_kernel_size,
                     padding=spectral_kernel_size // 2,
-                    bias=False,
+                    bias=self.bias,
                 )
             )
             layers.append(nn.ReLU(inplace=inplace))
@@ -44,11 +46,11 @@ class HyperspectralEncoder(nn.Module):
             nn.Conv2d(
                 in_channels=embed_dim,
                 out_channels=embed_dim,
-                kernel_size=(3, 1),
+                kernel_size=3,
                 stride=1,
-                padding=(1, 0),
+                padding=1,
                 dilation=1,
-                bias=False,
+                bias=self.bias,
             )
         )
         layers.append(nn.ReLU(inplace=inplace))
@@ -56,11 +58,11 @@ class HyperspectralEncoder(nn.Module):
             nn.Conv2d(
                 in_channels=embed_dim,
                 out_channels=embed_dim,
-                kernel_size=(1, 3),
+                kernel_size=3,
                 stride=1,
-                padding=(0, 1),
+                padding=1,
                 dilation=1,
-                bias=False,
+                bias=self.bias,
             )
         )
         layers.append(nn.ReLU(inplace=inplace))
