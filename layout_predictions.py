@@ -76,17 +76,27 @@ def collect_results(model, eval_ds, num_workers=0, device=torch.device('cpu'), i
 
     return results
 
-def save_cluster_map(cluster_map: torch.Tensor, save_dir: str, filename: str) -> None:
+def save_cluster_map(
+    cluster_map: torch.Tensor,
+    save_dir: str,
+    filename: str,
+    swap_axes: bool = False,
+    flip_ud: bool = False,
+    flip_lr: bool = False
+) -> None:
     """
-    Save HSI clustering result as a color-coded PNG image.
+    Save HSI clustering result as a color-coded PNG image, with optional orientation adjustments.
 
     Args:
         cluster_map (torch.Tensor): 2D tensor of shape (H, W) with integer cluster indices.
         save_dir (str): Directory to save the image.
         filename (str): Filename (without extension) for the saved image.
+        swap_axes (bool): If True, transpose the cluster_map before coloring.
+        flip_ud (bool): If True, flip the map upside-down.
+        flip_lr (bool): If True, flip the map left-to-right.
 
     Raises:
-        AssertionError: If cluster_map is not 2D, or if any cluster index is out of range.
+        AssertionError: If cluster_map is not 2D or indices fall outside [0, 7].
     """
     # Define up to 8 distinct colors (RGB)
     colors = [
@@ -104,21 +114,34 @@ def save_cluster_map(cluster_map: torch.Tensor, save_dir: str, filename: str) ->
     assert isinstance(cluster_map, torch.Tensor), \
         f"cluster_map must be a torch.Tensor, got {type(cluster_map)}"
     assert cluster_map.ndim == 2, \
-        f"cluster_map must be 2D, got shape {cluster_map.shape}"
+        f"cluster_map must be 2D, got shape {tuple(cluster_map.shape)}"
 
-    # Convert to integer indices
-    idx_map = cluster_map.cpu().to(torch.int64).numpy()
+    # Convert to int and adjust orientation
+    idx_map = cluster_map.cpu().to(torch.int64)
+    if swap_axes:
+        idx_map = idx_map.t()
+    if flip_ud or flip_lr:
+        dims = []
+        if flip_ud:
+            dims.append(0)
+        if flip_lr:
+            dims.append(1)
+        idx_map = torch.flip(idx_map, dims)
+
+    idx_map = idx_map.numpy()
+    H, W = idx_map.shape
+
+    # Check cluster index range
     min_idx, max_idx = int(idx_map.min()), int(idx_map.max())
-    assert min_idx >= 0, f"Cluster indices must be non-negative, got min {min_idx}"
+    assert min_idx >= 0, \
+        f"Cluster indices must be non-negative, got min {min_idx}"
     assert max_idx < len(colors), \
         f"Cluster index {max_idx} exceeds available colors ({len(colors)-1})"
-
-    H, W = idx_map.shape
 
     # Create RGB image array
     rgb = np.zeros((H, W, 3), dtype=np.uint8)
     for cid in range(max_idx + 1):
-        mask = idx_map == cid
+        mask = (idx_map == cid)
         rgb[mask] = colors[cid]
 
     # Ensure save directory exists
@@ -128,7 +151,7 @@ def save_cluster_map(cluster_map: torch.Tensor, save_dir: str, filename: str) ->
     # Save image
     img = Image.fromarray(rgb)
     img.save(save_path)
-    print(f"Successfully save {filename}'s predicted clusters in {save_path}.")
+
     return None
 
 def main():

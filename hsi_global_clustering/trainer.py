@@ -237,14 +237,17 @@ class HSIClusteringTrainer:
         self.augmentor = augmentor
         
         # Training DataLoader with custom collate for augmentation
-        self.train_loader = DataLoader(
-            train_dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=num_workers,
-            pin_memory=True,
-            collate_fn=pad_and_stack,
-        )
+        if train_dataset is not None:
+            self.train_loader = DataLoader(
+                train_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=num_workers,
+                pin_memory=True,
+                collate_fn=pad_and_stack,
+            )
+        else:
+            self.train_loader = None
 
         # Validation DataLoader (batch_size=1)
         if val_dataset is not None:
@@ -257,15 +260,18 @@ class HSIClusteringTrainer:
                 collate_fn=pad_and_stack,
             )
         else:
-            self.val_loader = DataLoader(
-            train_dataset,
-            batch_size=1,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=True,
-            collate_fn=crop_and_stack,
-        )
-        
+            if train_dataset is not None:
+                self.val_loader = DataLoader(
+                    train_dataset,
+                    batch_size=1,
+                    shuffle=False,
+                    num_workers=num_workers,
+                    pin_memory=True,
+                    collate_fn=crop_and_stack,
+                )
+            else:
+                self.val_loader = None
+
         # Optimizer and optional scheduler
         self.optimizer = optimizer_cls(self.model.parameters(), **optimizer_kwargs)
         self.scheduler = scheduler_cls(self.optimizer, **scheduler_kwargs) if scheduler_cls else None
@@ -298,6 +304,11 @@ class HSIClusteringTrainer:
         """
         Main training loop: logs losses, checkpoints, and runs evaluation.
         """
+        if self.train_loader is None:
+            # nothing to train on; just return
+            print("⚠️  No train_dataset provided—skipping train().")
+            return None
+
         for epoch in range(1, self.num_epochs + 1):
             self.model.train()
             running_loss = 0.0
@@ -405,6 +416,7 @@ class HSIClusteringTrainer:
 
         return None
 
+    @torch.no_grad()
     def _evaluate(self, epoch: int):
         """
         Evaluate on the validation set: compute supervised and unsupervised metrics.
@@ -414,19 +426,18 @@ class HSIClusteringTrainer:
         sup_iou = sup_dice = sup_rmse = 0.
         n_sup = 0
 
-        with torch.no_grad():
-            for batch in self.val_loader:
-                cubes, labels = batch
-                cubes = cubes.to(self.device)
-                preds = self.model.inference(cubes)[0]
-                curr_epoch_preds.append(preds.cpu())
+        for batch in self.val_loader:
+            cubes, labels = batch
+            cubes = cubes.to(self.device)
+            preds = self.model.inference(cubes)[0]
+            curr_epoch_preds.append(preds.cpu())
 
-                if labels is not None:
-                    labels = labels.to(self.device)
-                    sup_iou  += iou_score(preds, labels).item()
-                    sup_dice += dice_score(preds, labels).item()
-                    sup_rmse += area_rmse(preds, labels).item()
-                    n_sup   += 1
+            if labels is not None:
+                labels = labels.to(self.device)
+                sup_iou  += iou_score(preds, labels).item()
+                sup_dice += dice_score(preds, labels).item()
+                sup_rmse += area_rmse(preds, labels).item()
+                n_sup   += 1
 
         # Log supervised metrics
         if labels is not None:
@@ -477,21 +488,27 @@ class HSIClusteringTrainer:
 
         return sup_metrics, unsup_metrics
 
+    @torch.no_grad()
     def inference(
         self,
         dataset: Dataset,
         batch_size: Optional[int] = None,
         num_workers: Optional[int] = None,
         pin_memory: bool = True,
-        auto_align: bool = True
+        auto_align: bool = True,
+        manual_mapping: Optional[Dict[int, Tuple[int, ...]]] = None,  # ← new
+        progress_interval: Optional[int] = None,
     ):
         """
         Run inference on arbitrary-size cubes.
 
-        Returns:
-            preds: Tensor of shape (N, H, W)
-            If dataset provides labels and auto_align=True: also returns a
-            metrics dict {{'IoU', 'Dice', 'RMSE'}}.
+        Args:
+
+            auto_align:  If True, do Hungarian-based alignment (as before).
+            manual_mapping: If provided (and auto_align=False), should be a dict
+                mapping each label index to a tuple of cluster indices. E.g.
+                    { 0: (0,1),   # clusters 0 & 1 → label 0
+                      1: (2,) }  # cluster 2   → label 1
         """
         loader = DataLoader(
             dataset,
@@ -501,51 +518,110 @@ class HSIClusteringTrainer:
             pin_memory=pin_memory,
             collate_fn=pad_and_stack
         )
-        all_preds, all_labels = [], []
 
+        self.model.eval()
+        self.model.to(self.device)
+
+        all_preds, all_labels = [], []
         with torch.no_grad():
-            for batch in loader:
+            for step, batch in enumerate(loader):
                 cubes, labels = batch
                 cubes = cubes.to(self.device)
                 preds = self.model.inference(cubes)
-                all_preds.append(preds.cpu())
+                all_preds.append(preds.long().cpu())
                 if labels is not None:
-                    all_labels.append(label)
+                    all_labels.append(labels.long())
 
-        preds_tensor = torch.stack(all_preds, dim=0)
-        if not all_labels:
-            return preds_tensor
+                if progress_interval is not None:
+                    if (step + 1) % progress_interval == 0:
+                        print(f"Inference progress: {step+1}/{len(loader)}")
 
-        labels_tensor = torch.stack(all_labels, dim=0)
+        if len(all_labels) == 0:
+            return all_preds
 
-        # Auto-align clusters to labels via Hungarian
+        preds_list  = all_preds   # list of Tensors [Hᵢ×Wᵢ]
+        labels_list = all_labels  # list of Tensors [Hᵢ×Wᵢ]
+
+        # ----- build mapping_arr depending on auto_align or manual_mapping -----
         if auto_align:
-            K = int(preds_tensor.max()) + 1
-            C = int(labels_tensor.max()) + 1
+            # infer number of clusters (K) and labels (C)
+            K = int(max(p.max().item() for p in preds_list)) + 1
+            C = int(max(l.max().item() for l in labels_list)) + 1
             if K == C:
-                flat_p = preds_tensor.view(-1)
-                flat_l = labels_tensor.view(-1)
-                conf = torch.zeros(C, K, dtype=torch.int64)
-                for c in range(C):
-                    mask = flat_l == c
-                    conf[c] = torch.bincount(flat_p[mask], minlength=K)
-                row, col = linear_sum_assignment(-conf.numpy())
-                mapping = torch.arange(K)
+                # build confusion matrix of shape (K, C)
+                device = preds_list[0].device
+                conf = torch.zeros(K, C, device=device, dtype=torch.long)
+                for p, l in zip(preds_list, labels_list):
+                    fp = p.view(-1)
+                    fl = l.view(-1)
+                    idx = torch.stack([fp, fl], dim=0)
+                    conf.index_put_(tuple(idx), torch.ones_like(fp), accumulate=True)
+
+                # Hungarian on negative counts → maximize agreement
+                row, col = linear_sum_assignment((-conf).cpu().numpy())
+                mapping_arr = torch.arange(K, device=device)
                 for r, c in zip(row, col):
-                    mapping[c] = r
-                aligned = mapping[preds_tensor]
+                    mapping_arr[c] = r
             else:
-                aligned = preds_tensor
+                # mismatch: skip alignment
+                mapping_arr = None
+
+        elif manual_mapping is not None:
+            K = int(max(p.max().item() for p in preds_list)) + 1
+            device = preds_list[0].device
+            mapping_arr = torch.full((K,), -1, dtype=torch.long, device=device)
+            for label_id, cluster_idxs in manual_mapping.items():
+                for c_idx in cluster_idxs:
+                    mapping_arr[c_idx] = label_id
+            missing = (mapping_arr < 0).nonzero(as_tuple=False).view(-1).tolist()
+            if missing:
+                raise ValueError(f"manual_mapping missing clusters: {missing}")
+
         else:
-            aligned = preds_tensor
+            mapping_arr = None  # identity
+
+        # ----- apply mapping_arr (if any) to each sample -----
+        if mapping_arr is not None:
+            aligned_list = [mapping_arr[p] for p in preds_list]
+        else:
+            aligned_list = preds_list
+
+        # ----- compute per-sample metrics and average them -----
+        iou_vals  = [iou_score(a, l).item() for a, l in zip(aligned_list, labels_list)]
+        dice_vals = [dice_score(a, l).item() for a, l in zip(aligned_list, labels_list)]
+        rmse_vals = [area_rmse(a, l).item() for a, l in zip(aligned_list, labels_list)]
 
         metrics = {
-            'IoU':  iou_score(aligned, labels_tensor).item(),
-            'Dice': dice_score(aligned, labels_tensor).item(),
-            'RMSE': area_rmse(aligned, labels_tensor).item()
+            'mean_IoU':  sum(iou_vals)  / len(iou_vals),
+            'mean_Dice': sum(dice_vals) / len(dice_vals),
+            'mean_RMSE': sum(rmse_vals) / len(rmse_vals),
         }
-    
-        return aligned, metrics
 
+        # 4) **Per‐class** IoU / Dice
+        # Flatten all images into one vector each
+        pred_flat  = torch.cat([p.view(-1) for p in aligned_list])
+        label_flat = torch.cat([l.view(-1) for l in all_labels])
+        C = int(max(pred_flat.max(), label_flat.max())) + 1
+
+        # Build confusion matrix (rows=true, cols=pred)
+        conf = torch.zeros(C, C, device=pred_flat.device, dtype=torch.long)
+        idx  = torch.stack([label_flat, pred_flat], dim=0)
+        conf.index_put_(tuple(idx), torch.ones_like(label_flat), accumulate=True)
+
+        inter   = conf.diag().float()
+        sum_row = conf.sum(dim=1).float()
+        sum_col = conf.sum(dim=0).float()
+        union   = sum_row + sum_col - inter
+
+        class_iou  = inter / union
+        class_dice = 2 * inter / (sum_row + sum_col)
+
+        # merge into metrics
+        metrics.update({
+            **{f'IoU_class_{i}':  class_iou[i].item()  for i in range(C)},
+            **{f'Dice_class_{i}': class_dice[i].item() for i in range(C)},
+        })
+
+        return aligned_list, metrics
 
 

@@ -2,11 +2,13 @@ import os
 import glob
 import json
 
+import h5py
 import numpy as np
+import scipy.io
 
 import torch
 
-from typing import Optional
+from typing import Optional, Dict, Tuple
 from torch.utils.data import Dataset
 
 from PIL import Image, ImageDraw
@@ -22,46 +24,60 @@ class JSONMATDataset(Dataset):
         data_key: str = 'cube',
         label_key: Optional[str] = 'label',
         json_dir: Optional[str] = None,
-        class_to_index: Optional[dict] = None,
+        label_dir: Optional[str] = None,
+        class_to_index: Optional[Dict[str, int]] = None,
         transform: Optional[callable] = None,
         normalize: Optional[callable] = None,
         to_tensor: bool = True,
         full_loading: bool = False,
     ):
         """
+        Dataset for loading HSI cubes from .mat files, with optional label reading.
+
         Args:
-            mat_dir: directory of .mat files
-            data_key: key in .mat for the hyperspectral cube
-            label_key: optional key in .mat for a 2D mask
-            json_dir: directory of LabelMe JSONs (same basename as .mat)
-            class_to_index: mapping from JSON labels to integer classes
+            mat_dir: directory containing .mat files.
+            data_key: key in .mat dict for cube data.
+            label_key: key in annotation JSON for label, if using json_dir.
+            json_dir: directory with JSON annotations to rasterize onto cube.
+            label_dir: directory with .pth label files matching mat filenames.
+            class_to_index: mapping from class names to indices for JSON labels.
             transform: augmentation on (C, H, W)
             normalize: normalization on (C, H, W)
             to_tensor: whether to convert output to torch.Tensor
-            full_loading: if True, preload all data into memory (may use high RAM)
+            full_loading: if True, preload all samples into memory.
         """
         self.mat_dir = mat_dir
         self.data_key = data_key
         self.label_key = label_key
         self.json_dir = json_dir
-        self.class_to_index = class_to_index or {}
+        self.label_dir = label_dir
+        self.class_to_index = class_to_index
         self.transform = transform
         self.normalize = normalize
         self.to_tensor = to_tensor
         self.full_loading = full_loading
 
-        # discover .mat files
+        # collect .mat files
         self.files = sorted(glob.glob(os.path.join(mat_dir, '*.mat')))
+        if not self.files:
+            raise ValueError(f"No .mat files found in '{mat_dir}'")
 
         # detect HDF5-based .mat
         try:
-            import h5py
             with h5py.File(self.files[0], 'r'):
                 self._use_h5 = True
         except Exception:
             self._use_h5 = False
 
-        # preload data if requested
+        # only one annotation source allowed
+        if self.json_dir and self.label_dir:
+            raise ValueError("Provide only one of 'json_dir' or 'label_dir', not both.")
+        if self.json_dir and not os.path.isdir(self.json_dir):
+            raise ValueError(f"json_dir '{self.json_dir}' is not a valid directory")
+        if self.label_dir and not os.path.isdir(self.label_dir):
+            raise ValueError(f"label_dir '{self.label_dir}' is not a valid directory")
+
+        # preload if requested
         self._data_list = None
         if self.full_loading:
             self._data_list = self.load_all()
@@ -79,12 +95,10 @@ class JSONMATDataset(Dataset):
         path = self.files[idx]
         # 1) Load cube
         if self._use_h5:
-            import h5py
             dd = h5py.File(path, 'r')
             arr = dd[self.data_key][()]
             mat_label = dd.get(self.label_key, None)
         else:
-            import scipy.io
             dd = scipy.io.loadmat(path)
             arr = dd[self.data_key]
             mat_label = dd.get(self.label_key, None)
@@ -95,33 +109,55 @@ class JSONMATDataset(Dataset):
         elif arr.ndim != 3:
             raise RuntimeError(f'Expected 3D cube, got {arr.shape}')
 
-        # 3) Build mask from JSON if provided
-        mask = None
-        if self.json_dir:
-            base = os.path.basename(path).replace('.mat', '.json')
-            jpath = os.path.join(self.json_dir, base)
-            if os.path.exists(jpath):
-                data = json.load(open(jpath))
-                H, W = arr.shape[1], arr.shape[2]
-                img = Image.new('I', (W, H), 0)
-                draw = ImageDraw.Draw(img)
-                for shape in data.get('shapes', []):
-                    label = shape['label']
-                    pts = shape['points']
-                    lbl = self.class_to_index.get(label, 0)
-                    poly = [(x, y) for x, y in pts]
-                    draw.polygon(poly, fill=int(lbl))
-                mask = np.array(img, dtype=np.int64)
+        cube = torch.from_numpy(arr.astype('float32'))
+
+        # 3) Build mask from JSON or PTH if provided
+        label = None
+        # case 1: load from .pth files
+        if self.label_dir:
+            base = os.path.splitext(os.path.basename(path))[0]
+            label_path = os.path.join(self.label_dir, base + '.pth')
+            if not os.path.exists(label_path):
+                raise FileNotFoundError(f"Label file not found: '{label_path}'")
+            label = torch.load(label_path)
+            if not isinstance(label, torch.Tensor):
+                raise TypeError(f"Loaded label must be a Tensor, got {type(label)}")
+            if label.ndim != 2:
+                raise ValueError(f"Label tensor must be 2D (H,W), got {label.ndim}D")
+            # spatial dims must match
+            if label.shape[0] != cube.shape[1] or label.shape[1] != cube.shape[2]:
+                raise ValueError(
+                    f"Label shape {label.shape} does not match cube spatial dims "
+                    f"{(cube.shape[1], cube.shape[2])}"
+                )
+
+        # case 2: rasterize JSON polygons
+        elif self.json_dir:
+            base = os.path.splitext(os.path.basename(path))[0]
+            json_path = os.path.join(self.json_dir, base + '.json')
+            if not os.path.exists(json_path):
+                raise FileNotFoundError(f"JSON file not found: '{json_path}'")
+            with open(json_path, 'r') as f:
+                ann = json.load(f)
+            # create a blank label image
+            H, W = cube.shape[1], cube.shape[2]
+            img = Image.new('L', (W, H), 0)
+            draw = ImageDraw.Draw(img)
+            for obj in ann.get('shapes', []):
+                cls = obj.get('label')
+                cls_idx = self.class_to_index.get(cls, 0) if self.class_to_index else 0
+                pts = [tuple(pt) for pt in obj.get('points', [])]
+                draw.polygon(pts, fill=cls_idx)
+            label = torch.from_numpy(np.array(img)).long()
 
         # 4) Fallback to MAT label
-        if mask is None and mat_label is not None:
+        if label is None and mat_label is not None:
             if mat_label.ndim == 2:
-                mask = mat_label.astype(np.int64)
+                label = mat_label.astype(np.int64)
             else:
                 raise RuntimeError(f'Invalid mat label shape {mat_label.shape}')
 
         # 5) Convert to tensor and apply transforms
-        cube = torch.from_numpy(arr.astype('float32'))
         if self.normalize:
             cube = self.normalize(cube)
         if self.transform:
@@ -129,9 +165,8 @@ class JSONMATDataset(Dataset):
         if self.to_tensor and not torch.is_tensor(cube):
             cube = torch.from_numpy(cube)
 
-        if mask is not None:
-            mask_t = torch.from_numpy(mask)
-            return cube, mask_t
+        if label is not None:
+            return cube, label
 
         return cube
 
