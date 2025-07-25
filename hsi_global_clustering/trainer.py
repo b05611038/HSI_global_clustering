@@ -13,6 +13,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from typing import Optional, Callable, Dict, Tuple, Union
 
+from .utils import LinearWarmupDecayScheduler
 from .hsi_clustering import HyperspectralClusteringModel
 from .eval import (
     iou_score, dice_score, area_rmse,
@@ -205,9 +206,12 @@ class HSIClusteringTrainer:
         device: torch.device = torch.device('cpu'),
         optimizer_cls: Callable = optim.AdamW,
         optimizer_kwargs: dict = {'lr': 1e-4},
-        scheduler_cls: Optional[Callable] = None,
-        scheduler_kwargs: dict = {},
-        ema_decay: float = 0.95,
+        optim_scheduler_cls: Optional[Callable] = None,
+        optim_scheduler_kwargs: dict = {},
+        loss_weight_scheduling: dict = {'lambda_unif': True, 'lambda_orth': False, 'lambda_bal': False, 'lambda_cons': False},
+        ema_decay: float = 0.99,
+        ema_kick: float = 0.05,
+        ema_kick_scheduling: bool = True,
         batch_size: int = 4,
         num_workers: int = 8,
         num_epochs: int = 10,
@@ -233,6 +237,7 @@ class HSIClusteringTrainer:
             self.model = HyperspectralClusteringModel(**model_kwargs).to(device)
         else:
             self.model = model.to(device)
+
         self.precision = precision
         self.augmentor = augmentor
         
@@ -274,13 +279,43 @@ class HSIClusteringTrainer:
 
         # Optimizer and optional scheduler
         self.optimizer = optimizer_cls(self.model.parameters(), **optimizer_kwargs)
-        self.scheduler = scheduler_cls(self.optimizer, **scheduler_kwargs) if scheduler_cls else None
+        self.optim_scheduler = None
+        if optim_scheduler_cls:
+            self.optim_scheduler = optim_scheduler_cls(self.optimizer, **optim_scheduler_kwargs)
+
+        available_terms = ['lambda_unif', 'lambda_orth', 'lambda_bal', 'lambda_cons']
+        self.loss_weight_scheduling = loss_weight_scheduling
+        loss_args_mapping = {'lambda_unif': self.model.lambda_unif,
+                             'lambda_orth': self.model.lambda_orth,
+                             'lambda_bal': self.model.lambda_bal,
+                             'lambda_cons': self.model.lambda_cons}
+
+        self.loss_weight_scheduler = {'lambda_unif': None, 'lambda_orth': None, 'lambda_bal': None, 'lambda_cons': None}
+        for loss_term in loss_weight_scheduling:
+            assert loss_term in available_terms
+            if loss_weight_scheduling[loss_term]:
+                init_value = loss_args_mapping[loss_term]
+                self.loss_weight_scheduler[loss_term] = LinearWarmupDecayScheduler(init_value=init_value,
+                                                                                   peak_value=init_value,
+                                                                                   final_value=0.,
+                                                                                   warmup_steps=0,
+                                                                                   total_steps=num_epochs)
         
         # Training settings
         self.num_epochs = num_epochs
         self.reuse_iter = reuse_iter
         self.ema_decay = ema_decay
+        self.ema_kick = ema_kick
         self.grad_clip = grad_clip
+
+        self.ema_kick_scheduler = None
+        self.ema_kick_scheduling = ema_kick_scheduling
+        if ema_kick_scheduling:
+            self.ema_kick_scheduler = LinearWarmupDecayScheduler(init_value=ema_kick,
+                                                                 peak_value=ema_kick,
+                                                                 final_value=0.,
+                                                                 warmup_steps=0,
+                                                                 total_steps=num_epochs)
         
         # Logging and checkpointing
         timestamp = time.strftime('%Y%m%d_%H%M%S')
@@ -309,6 +344,15 @@ class HSIClusteringTrainer:
             print("⚠️  No train_dataset provided—skipping train().")
             return None
 
+        loss_weight_kwargs = {}
+        for loss_term in self.loss_weight_scheduler:
+            if self.loss_weight_scheduler[loss_term]:
+                loss_weight_kwargs[loss_term] = self.loss_weight_scheduler[loss_term]()
+            else:
+                loss_weight_kwargs[loss_term] = None
+
+        ema_kick_scale = self.ema_kick
+
         for epoch in range(1, self.num_epochs + 1):
             self.model.train()
             running_loss = 0.0
@@ -323,9 +367,8 @@ class HSIClusteringTrainer:
                     c1 = crops[:, 1]
 
                     self.optimizer.zero_grad()
-
                     with torch.amp.autocast(device_type=self.device.type, enabled=(self.precision != 'fp32')):
-                        loss, loss_dict, ema_dict = self.model.train_step(c0, c1)
+                        loss, loss_dict, ema_dict = self.model.train_step(c0, c1, **loss_weight_kwargs)
 
                     loss.backward()
                     nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
@@ -334,10 +377,7 @@ class HSIClusteringTrainer:
                     z1, p1 = ema_dict['z1'], ema_dict['p1']
                     z2, p2 = ema_dict['z2'], ema_dict['p2']
 
-                    self._ema_update_centroids(z1, p1, z2, p2, ema_decay=self.ema_decay)
-
-                    if self.scheduler:
-                        self.scheduler.step()
+                    self._ema_update_centroids(z1, p1, z2, p2, self.ema_decay, ema_kick_scale)
 
                     running_loss += loss.item()
                     if step % self.log_interval == 0:
@@ -366,6 +406,16 @@ class HSIClusteringTrainer:
                                     unsup_metrics=unsup_metrics,
                                     total_epochs=self.num_epochs)
 
+            if self.optim_scheduler:
+                self.optim_scheduler.step()
+
+            if self.ema_kick_scheduler:
+                ema_kick_scale = self.ema_kick_scheduler.step()
+
+            for loss_term in self.loss_weight_scheduler:
+                if self.loss_weight_scheduler[loss_term]:
+                    loss_weight_kwargs[loss_term] = self.loss_weight_scheduler[loss_term].step()
+
             # Early stopping check
             if self.early_stopping and self.es_metric:
                 if self.no_improve >= self.patience:
@@ -382,8 +432,8 @@ class HSIClusteringTrainer:
         return None
 
     @torch.no_grad()
-    def _ema_update_centroids(self, z1, p1, z2, p2, ema_decay, 
-                              mass_thresh=1e-3, kick_scale=0.01, eps=1e-6):
+    def _ema_update_centroids(self, z1, p1, z2, p2, ema_decay, kick_scale, 
+                              mass_thresh=1e-3, eps=1e-6):
         B, D, h, w = z1.shape
         N = B * h * w
         z1_flat = z1.reshape(N, D)

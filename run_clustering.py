@@ -68,8 +68,12 @@ def parse_args():
         help='Number of mean-shift iterations (unrolled steps)'
     )
     parser.add_argument(
-        '--ema_decay', type=float, default=0.95,
+        '--ema_decay', type=float, default=0.99,
         help='EMA decay of cluster centroid moving.'
+    )
+    parser.add_argument(
+        '--ema_kick', type=float, default=0.01,
+        help='EMA random kick of non-acitivated centroid.'
     )
     parser.add_argument(
         '--epochs', type=int, default=10,
@@ -84,7 +88,7 @@ def parse_args():
         help='Batch size (number of samples per batch)'
     )
     parser.add_argument(
-        '--reuse_iter', type=int, default=10,
+        '--reuse_iter', type=int, default=5,
         help='Repeated use in a single HSI acquistion.'
     )
     parser.add_argument(
@@ -116,7 +120,7 @@ def parse_args():
         help='Beta1 of AdamW.'
     )
     parser.add_argument(
-        '--wd', type=float, default=1e-2,
+        '--wd', type=float, default=0.01,
         help='Weight decay (L2 regularization)'
     )
     parser.add_argument(
@@ -165,12 +169,12 @@ def main():
                 'n_spectral_layers': 3,
                 'spectral_kernel_size': 9,
                 'embed_dim': args.embed_dim,
-                'bias': True
+                'bias': False,
             },
             'mean_shift_kwargs': {
                 'embed_dim': args.embed_dim,
                 'n_clusters': args.n_clusters,
-                'num_iters': args.num_iters
+                'num_iters': args.num_iters,
             },
             'loss_weights': {
                 'orth': args.coef_orth,
@@ -181,7 +185,10 @@ def main():
         },
         device=torch.device(args.device),
         optimizer_kwargs={'lr': args.lr, 'betas': (args.beta1, args.beta2), 'weight_decay': args.wd},
+        loss_weight_scheduling={'lambda_unif': True, 'lambda_orth': False, 'lambda_bal': False, 'lambda_cons': False},
         ema_decay=args.ema_decay,
+        ema_kick=args.ema_kick,
+        ema_kick_scheduling=True,
         num_workers=num_workers,
         num_epochs=args.epochs,
         reuse_iter=args.reuse_iter,

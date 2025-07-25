@@ -1,6 +1,8 @@
 import os
 import json
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -42,7 +44,7 @@ class HyperspectralClusteringModel(nn.Module):
         )
 
         # unpack loss‐weights
-        lw = {'orth':1e-5,'bal':1.0,'unif':1.0,'cons':1.0}
+        lw = {'orth': 1.0, 'bal': 1.0,'unif': 1.0,'cons': 1.0}
         lw.update(self._init_args["loss_weights"])
         self.lambda_orth = lw['orth']
         self.lambda_bal  = lw['bal']
@@ -57,7 +59,13 @@ class HyperspectralClusteringModel(nn.Module):
         outputs = self.cluster(embeds, return_probs=return_probs, return_labels=return_labels)
         return outputs if isinstance(outputs, tuple) else (outputs,)
 
-    def train_step(self, crop1: torch.Tensor, crop2: torch.Tensor):
+    def train_step(self, 
+                   crop1: torch.Tensor, 
+                   crop2: torch.Tensor, 
+                   lambda_unif: Optional[float] = None,
+                   lambda_orth: Optional[float] = None,
+                   lambda_bal: Optional[float] = None,
+                   lambda_cons: Optional[float] = None):
         """
         One training step over two random crops:
             - encode both
@@ -65,6 +73,18 @@ class HyperspectralClusteringModel(nn.Module):
             - compute compactness, orthogonality, balance, consistency losses
         Returns total loss and dict of individual losses.
         """
+        if lambda_unif is None:
+            lambda_unif = self.lambda_unif
+
+        if lambda_orth is None:
+            lambda_orth = self.lambda_orth
+
+        if lambda_bal is None:
+            lambda_bal = self.lambda_bal
+
+        if lambda_cons is None:
+            lambda_cons = self.lambda_cons
+
         # encode
         z1 = self.encoder(crop1)  # (B,D,H,W)
         z2 = self.encoder(crop2)
@@ -89,7 +109,11 @@ class HyperspectralClusteringModel(nn.Module):
         bal2  = self.cluster.compute_balance_loss(p2_flat)
         bal   = (bal1 + bal2) / 2
         cons  = self.cluster.compute_consistency_loss(p1_flat, p2_flat)
-        total = comp1 + comp2 + self.lambda_unif*unif + self.lambda_orth*orth + self.lambda_bal*bal + self.lambda_cons*cons
+        total = comp1 + comp2 + \
+                lambda_unif * unif + \
+                lambda_orth * orth + \
+                lambda_bal * bal + \
+                lambda_cons * cons
 
         loss_dict = {'comp1': comp1, 'comp2': comp2, 'unif': unif, 'orth': orth, 'bal': bal, 'cons': cons}
         ema_dict = {'z1': shifted1, 'p1': p1, 'z2': shifted2, 'p2': p2}
