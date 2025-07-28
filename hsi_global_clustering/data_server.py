@@ -50,7 +50,8 @@ class DataServer:
             self._proc.start()
 
     def _worker(self):
-        torch.cuda.set_device(self.device)
+        if self.device.type == "cuda":
+            torch.cuda.set_device(self.device)
         idxs = list(range(len(self.dataset)))
         rng = random.Random(self.seed)
         while True:
