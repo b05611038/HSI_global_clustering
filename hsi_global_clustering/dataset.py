@@ -95,9 +95,9 @@ class JSONMATDataset(Dataset):
         path = self.files[idx]
         # 1) Load cube
         if self._use_h5:
-            dd = h5py.File(path, 'r')
-            arr = dd[self.data_key][()]
-            mat_label = dd.get(self.label_key, None)
+            with h5py.File(path, 'r') as dd:
+                arr = dd[self.data_key][()]
+                mat_label = dd.get(self.label_key, None)
         else:
             dd = scipy.io.loadmat(path)
             arr = dd[self.data_key]
