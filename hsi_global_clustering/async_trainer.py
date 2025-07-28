@@ -23,6 +23,7 @@ class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
         **kwargs
     ):
         super().__init__(train_dataset=None, val_dataset=val_dataset, reuse_iter=1, *args, **kwargs)
+
         self.data_server = data_server
         self.steps_per_epoch = steps_per_epoch or math.ceil(len(self.data_server.dataset) / self.batch_size)
 
@@ -81,7 +82,12 @@ class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
 
             if self.val_loader and epoch % self.eval_interval == 0:
                 sup_metrics, unsup_metrics = self._evaluate(epoch)
-                print_epoch_summary(epoch, train_loss=avg_loss, sup_metrics=sup_metrics, unsup_metrics=unsup_metrics, total_epochs=self.num_epochs)
+                print(unsup_metrics)
+                print_epoch_summary(epoch,
+                                    train_loss=avg_loss, 
+                                    sup_metrics=sup_metrics, 
+                                    unsup_metrics=unsup_metrics, 
+                                    total_epochs=self.num_epochs)
 
             if self.optim_scheduler:
                 self.optim_scheduler.step()
@@ -104,3 +110,5 @@ class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
         self.data_server.stop()
         print('HSIClustering training done !!')
         return None
+
+

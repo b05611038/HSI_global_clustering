@@ -84,6 +84,10 @@ def parse_args():
         help='Total number of training epochs'
     )
     parser.add_argument(
+        '--steps_per_epoch', type=int, default=1000,
+        help='Iteration of an epoch.'
+    )
+    parser.add_argument(
         '--save_interval', type=int, default=2,
         help='Interval of saving cluster model'
     )
@@ -185,11 +189,11 @@ def main():
         device=torch.device(args.device),
         optimizer_kwargs=optimizer_kwargs,
         loss_weight_scheduling=scheduler_kwargs,
-
         ema_decay=args.ema_decay,
         ema_kick=args.ema_kick,
         ema_kick_scheduling=DEFAULT_EMA_KICK_SCHEDULING,
         num_epochs=args.epochs,
+        steps_per_epoch=args.steps_per_epoch,
         batch_size=args.batch,
         log_dir=os.path.join(args.out_dir, 'logs'),
         ckpt_dir=os.path.join(args.out_dir, 'checkpoints'),

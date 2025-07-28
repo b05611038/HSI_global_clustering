@@ -2,15 +2,15 @@
 set -euo pipefail
 
 if [ $# -lt 3 ]; then
-  echo "Usage: $0 MODEL_DIR OUT_BASE DEVICE [MAT_DIR]"
-  echo "Example: $0 test_model outputs cuda:0 ./data/sliced_hsi_mat"
+  echo "Usage: $0 [MODEL_DIR] [OUT_BASE] [DEVICE] [MAT_DIR]"
+  echo "Example: $0 test_model outputs cuda:0 ./data/hsi_mat"
   exit 1
 fi
 
 MODEL_DIR=$1
 OUT_BASE=$2
 DEVICE=$3
-MAT_DIR=${4:-./data/sliced_hsi_mat}
+MAT_DIR=${4:-./data/hsi_mat}
 
 CHKPT_ROOT="${MODEL_DIR}/checkpoints"
 if [ ! -d "$CHKPT_ROOT" ]; then

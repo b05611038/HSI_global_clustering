@@ -303,6 +303,7 @@ class HSIClusteringTrainer:
                                                                                    total_steps=num_epochs)
         
         # Training settings
+        self.batch_size = batch_size
         self.num_epochs = num_epochs
         self.reuse_iter = reuse_iter
         self.ema_decay = ema_decay
