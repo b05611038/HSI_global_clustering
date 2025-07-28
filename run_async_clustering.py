@@ -129,7 +129,7 @@ def parse_args():
     )
     parser.add_argument(
         '--device', type=str, default='cpu',
-        help='Compute device, e.g. "cuda" or "cpu"'
+        help='Compute device for both training and the data server, e.g. "cuda" or "cpu"'
     )
     return parser.parse_args()
 
@@ -159,7 +159,7 @@ def main():
     val_ds = None
 
     # Build asynchronous data server and trainer
-    server = DataServer(train_ds, queue_size=args.batch)
+    server = DataServer(train_ds, queue_size=args.batch, device=args.device)
 
     model_kwargs = deepcopy(DEFAULT_MODEL_KWARGS)
     model_kwargs.update({'num_bands': args.bands})
