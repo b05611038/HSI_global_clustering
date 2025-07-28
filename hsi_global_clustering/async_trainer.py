@@ -23,7 +23,9 @@ class DataServerRpc:
         mat_paths: List[str],
         batch_size: int,
         loader_fn: Callable[[str], Tuple[torch.Tensor, torch.Tensor]],
+        server_name: str = "dataserver",
     ) -> None:
+        _init_rpc_backend(name=server_name)
         self.mat_paths = mat_paths
         self.batch_size = batch_size
         self.loader_fn = loader_fn
@@ -70,6 +72,25 @@ class DataServerRpc:
 def _call_method(method, rref, *args, **kwargs):
     return method(rref.local_value(), *args, **kwargs)
 
+
+def _init_rpc_backend(name: str) -> None:
+    """Initialize the RPC backend using environment variables."""
+    rank = int(os.environ.get("RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    master_addr = os.environ.get("MASTER_ADDR", "localhost")
+    master_port = os.environ.get("MASTER_PORT", "29500")
+    init_method = f"tcp://{master_addr}:{master_port}"
+
+    if not rpc.is_initialized():
+        rpc.init_rpc(
+            name=name,
+            rank=rank,
+            world_size=world_size,
+            backend=rpc.BackendType.TENSORPIPE,
+            rpc_backend_options=rpc.TensorPipeRpcBackendOptions(init_method=init_method),
+        )
+
+
 class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
     """Trainer variant that pulls batches asynchronously from ``DataServerRpc``."""
 
@@ -79,7 +100,6 @@ class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
         loader_fn: Callable[[str], Tuple[torch.Tensor, torch.Tensor]],
         server_name: str = "server",
         trainer_name: str = "trainer",
-        rpc_init_method: str = "tcp://localhost:29500",
         val_dataset: Optional[Dataset] = None,
         steps_per_epoch: Optional[int] = None,
         *args,
@@ -87,17 +107,15 @@ class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
     ) -> None:
         super().__init__(train_dataset=None, val_dataset=val_dataset, reuse_iter=1, *args, **kwargs)
 
-        rpc.init_rpc(
-            name=trainer_name,
-            backend=rpc.BackendType.TENSORPIPE,
-            rpc_backend_options=rpc.TensorPipeRpcBackendOptions(init_method=rpc_init_method),
-        )
-
         self.server_name = server_name
+        self.trainer_name = trainer_name
+
+        _init_rpc_backend(name=self.trainer_name)
+
         self.server_rref = rpc.remote(
-            to=server_name,
+            to=self.server_name,
             func=DataServerRpc,
-            args=(mat_paths, self.batch_size, loader_fn),
+            args=(mat_paths, self.batch_size, loader_fn, self.server_name),
         )
 
         self.steps_per_epoch = steps_per_epoch or math.ceil(len(mat_paths) / self.batch_size)
