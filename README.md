@@ -11,7 +11,7 @@ This repository implements an end-to-end, label-free hyperspectral image (HSI) c
 - **Data Augmentation**: Overlapping two-crop strategy, random affine, and wavelength shifts.
 - **GPU-friendly Metrics**: IoU, Dice, Area RMSE, entropy, NMI, VI—all implemented in PyTorch.
 - **Single-GPU Trainer**: Custom `Trainer` class with mixed-precision, gradient clipping, checkpointing, TensorBoard logging, early stopping, and flexible inference.
-- **Async Trainer**: Optional `DataServer` and `AsyncHSIClusteringTrainer` for prefetching data in a separate process.
+- **Async Trainer**: Optional `DataServer` and `AsyncHSIClusteringTrainer` for prefetching data in a separate process. The server can now move samples to a target device before sending them.
 
 ## Installation
 
@@ -59,7 +59,8 @@ python run_clustering.py \
 
 For asynchronous loading (useful when the dataset is stored on slow disks) run
 `run_async_clustering.py` with the same arguments. The data server automatically
-prefetches with a queue size equal to the batch size.
+prefetches with a queue size equal to the batch size and can push tensors
+directly to CUDA for faster hand-off.
 
 Default hyperparameters for the model, optimizer and EMA behaviour are defined in
 `hsi_global_clustering/default_argument.py` and shared by both training scripts.

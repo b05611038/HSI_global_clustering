@@ -49,7 +49,8 @@ class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
 
             for step in range(1, self.steps_per_epoch + 1):
                 cubes, _ = self.data_server.get_batch(self.batch_size)
-                cubes = cubes.to(self.device, non_blocking=True)
+                if cubes.device != self.device:
+                    cubes = cubes.to(self.device, non_blocking=True)
 
                 crops = self.augmentor(cubes)
                 c0, c1 = crops[:, 0], crops[:, 1]
