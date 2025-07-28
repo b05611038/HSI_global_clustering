@@ -156,7 +156,7 @@ def main():
     )
 
     # (Optional) build validation dataset by splitting or separate directory
-    val_ds = None
+    val_ds = deepcopy(train_ds)
 
     # Build asynchronous data server and trainer
     server = DataServer(train_ds, queue_size=args.batch, device=args.device)

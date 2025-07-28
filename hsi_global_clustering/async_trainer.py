@@ -83,7 +83,6 @@ class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
 
             if self.val_loader and epoch % self.eval_interval == 0:
                 sup_metrics, unsup_metrics = self._evaluate(epoch)
-                print(unsup_metrics)
                 print_epoch_summary(epoch,
                                     train_loss=avg_loss, 
                                     sup_metrics=sup_metrics, 
