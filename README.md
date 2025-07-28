@@ -11,6 +11,7 @@ This repository implements an end-to-end, label-free hyperspectral image (HSI) c
 - **Data Augmentation**: Overlapping two-crop strategy, random affine, and wavelength shifts.
 - **GPU-friendly Metrics**: IoU, Dice, Area RMSE, entropy, NMI, VI—all implemented in PyTorch.
 - **Single-GPU Trainer**: Custom `Trainer` class with mixed-precision, gradient clipping, checkpointing, TensorBoard logging, early stopping, and flexible inference.
+- **Async Trainer**: Optional `DataServer` and `AsyncHSIClusteringTrainer` for prefetching data in a separate process.
 
 ## Installation
 
@@ -56,6 +57,13 @@ python run_clustering.py \
   --device cuda
 ```
 
+For asynchronous loading (useful when the dataset is stored on slow disks) run
+`run_async_clustering.py` with the same arguments. The data server automatically
+prefetches with a queue size equal to the batch size.
+
+Default hyperparameters for the model, optimizer and EMA behaviour are defined in
+`hsi_global_clustering/default_argument.py` and shared by both training scripts.
+
 This will:
 
 1. Create output folders (`logs/`, `checkpoints/`) under `/outputs`.
@@ -64,13 +72,32 @@ This will:
 4. Save checkpoint files to `/outputs/checkpoints`.
 5. Run inference on the training set and save predictions to `/outputs/predictions.pt`.
 
+## Evaluation & Inference
+
+The `eval_clustering.py` utility runs inference and computes metrics. It accepts
+either automatic Hungarian alignment or a manual mapping between clusters and
+semantic labels:
+
+```bash
+python eval_clustering.py \
+  --checkpoint_path /path/to/ckpt \
+  --mat_dir /data/hsi_mat \
+  --json_dir /data/hsi_json \
+  --auto-align                # or --manual-mapping '{0:[0],1:[1,2,3]}'
+```
+
+For image layouts of all cubes in a directory, see `layout_predictions.py` (also
+used by `run_layout.sh`).
+
 ## Code Structure
 
 - `hsi_global_clustering/datasets.py` — `JSONMATDataset` for streaming `.mat` + JSON loading.
 - `hsi_global_clustering/hsi_processing.py` — GPU-friendly augmentation pipeline.
 - `hsi_global_clustering/hsi_clustering.py` — `HyperspectralClusteringModel` combining encoder + mean-shift.
 - `hsi_global_clustering/trainer.py` — `Trainer` class for single-GPU training and evaluation.
+- `hsi_global_clustering/async_trainer.py` and `data_server.py` — asynchronous training with background prefetching.
 - `hsi_global_clustering/eval.py` — PyTorch implementations of IoU, Dice, RMSE, entropy, NMI, VI.
+- `hsi_global_clustering/default_argument.py` — shared default hyperparameters for the training scripts.
 - `run_clustering.py` — Example script tying everything together.
 
 ## TensorBoard Monitoring
