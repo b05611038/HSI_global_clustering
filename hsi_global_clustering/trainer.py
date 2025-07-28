@@ -51,29 +51,30 @@ def pad_and_stack(batch: list):
         else:
             cubes.append(item)
 
-        # compute max dims
-        _, hs, ws = zip(*[c.shape for c in cubes])
-        H_max, W_max = max(hs), max(ws)
-        # pad cubes
-        padded_cubes = []
-        for c in cubes:
-            C, h, w = c.shape
-            pad = (0, W_max - w, 0, H_max - h)  # (left,right,top,bottom)
-            padded_cubes.append(F.pad(c, pad, mode='reflect'))
+    # compute max dims after gathering all cubes
+    _, hs, ws = zip(*[c.shape for c in cubes])
+    H_max, W_max = max(hs), max(ws)
 
-        batch_cubes = torch.stack(padded_cubes, dim=0)
-        # pad labels if present
-        if has_labels:
-            padded_labels = []
-            for l in labels:
-                h, w = l.shape
-                pad = (0, W_max - w, 0, H_max - h)
-                padded_labels.append(F.pad(l.unsqueeze(0), pad, mode='constant', value=0).squeeze(0))
+    # pad cubes
+    padded_cubes = []
+    for c in cubes:
+        C, h, w = c.shape
+        pad = (0, W_max - w, 0, H_max - h)  # (left,right,top,bottom)
+        padded_cubes.append(F.pad(c, pad, mode='reflect'))
 
-            batch_labels = torch.stack(padded_labels, dim=0)
-            return batch_cubes, batch_labels
+    batch_cubes = torch.stack(padded_cubes, dim=0)
 
-        return batch_cubes, None
+    if has_labels:
+        padded_labels = []
+        for l in labels:
+            h, w = l.shape
+            pad = (0, W_max - w, 0, H_max - h)
+            padded_labels.append(F.pad(l.unsqueeze(0), pad, mode='constant', value=0).squeeze(0))
+
+        batch_labels = torch.stack(padded_labels, dim=0)
+        return batch_cubes, batch_labels
+
+    return batch_cubes, None
 
 def crop_and_stack(batch: list):
     """
