@@ -1,4 +1,5 @@
 import os
+import sys
 import copy
 import argparse
 
@@ -32,6 +33,10 @@ def parse_args():
     parser.add_argument(
         '--img_dir', type=str, default='',
         help='Directory where output images will be saved'
+    )
+    parser.add_argument(
+        '--layout_pth', action='store_true',
+        help='To save layout tensors.'
     )
     parser.add_argument(
         '--layout_image', action='store_true',
@@ -162,13 +167,19 @@ def main():
         full_load = True
         num_workers = 0
 
-    layout_image = False
+    layout_image, layout_pth = False, False
     if args.layout_image:
         layout_image = True
         if len(args.img_dir) == 0:
             img_dir = args.out_dir
         else:
             img_dir = args.img_dir
+
+    if args.layout_pth:
+        layout_pth = True
+
+    if (not layout_image) and (not layout_pth):
+        sys.exit('--layout_image and --layout_pth need to be set in the program.')
 
     device = torch.device(args.device)
     model = HyperspectralClusteringModel.load(args.checkpoint_path)
@@ -185,8 +196,10 @@ def main():
     results = collect_results(model, eval_ds, num_workers=num_workers, device=device)
     for filename in results:
         pred_clusters = results[filename]
-        save_path = os.path.join(args.out_dir, f"{filename}.pth")
-        torch.save(pred_clusters, save_path)
+        if layout_pth:
+            save_path = os.path.join(args.out_dir, f"{filename}.pth")
+            torch.save(pred_clusters, save_path)
+
         if layout_image:
             save_cluster_map(pred_clusters, img_dir, filename) 
 

@@ -185,7 +185,11 @@ def main():
         },
         device=torch.device(args.device),
         optimizer_kwargs={'lr': args.lr, 'betas': (args.beta1, args.beta2), 'weight_decay': args.wd},
-        loss_weight_scheduling={'lambda_unif': True, 'lambda_orth': False, 'lambda_bal': False, 'lambda_cons': False},
+        loss_weight_scheduling={'lambda_unif': False, 
+                                'lambda_orth': False, 
+                                'lambda_bal': False, 
+                                'lambda_cons': False},
+
         ema_decay=args.ema_decay,
         ema_kick=args.ema_kick,
         ema_kick_scheduling=True,
