@@ -11,7 +11,7 @@ This repository implements an end-to-end, label-free hyperspectral image (HSI) c
 - **Data Augmentation**: Overlapping two-crop strategy, random affine, and wavelength shifts.
 - **GPU-friendly Metrics**: IoU, Dice, Area RMSE, entropy, NMI, VI—all implemented in PyTorch.
 - **Single-GPU Trainer**: Custom `Trainer` class with mixed-precision, gradient clipping, checkpointing, TensorBoard logging, early stopping, and flexible inference.
-- **Async Trainer**: RPC-based `DataServerRpc` used by `AsyncHSIClusteringTrainer` to prefetch data in a background thread for non-blocking GPU transfer.
+- **Async Trainer**: Shared-memory queue used by `AsyncHSIClusteringTrainer` to prefetch data in a background process for non-blocking GPU transfer.
 
 ## Installation
 
@@ -58,9 +58,9 @@ python run_clustering.py \
 ```
 
 For asynchronous loading (useful when the dataset is stored on slow disks) run
-`run_async_clustering.py` with the same arguments. It launches a lightweight
-RPC worker that prefetches batches in a separate thread and pins them for
-non-blocking transfer to CUDA.
+`run_async_clustering.py` with the same arguments. It launches a background
+process that populates a shared-memory queue so that batches can be retrieved
+without blocking GPU transfer.
 
 Default hyperparameters for the model, optimizer and EMA behaviour are defined in
 `hsi_global_clustering/default_argument.py` and shared by both training scripts.
@@ -96,7 +96,9 @@ used by `run_layout.sh`).
 - `hsi_global_clustering/hsi_processing.py` — GPU-friendly augmentation pipeline.
 - `hsi_global_clustering/hsi_clustering.py` — `HyperspectralClusteringModel` combining encoder + mean-shift.
 - `hsi_global_clustering/trainer.py` — `Trainer` class for single-GPU training and evaluation.
-- `hsi_global_clustering/async_trainer.py` — asynchronous training via RPC; `data_server.py` contains the legacy multiprocessing loader.
+- `hsi_global_clustering/async_trainer.py` — asynchronous training via a
+  shared-memory queue; `data_server.py` contains the legacy multiprocessing
+  loader.
 - `hsi_global_clustering/eval.py` — PyTorch implementations of IoU, Dice, RMSE, entropy, NMI, VI.
 - `hsi_global_clustering/default_argument.py` — shared default hyperparameters for the training scripts.
 - `run_clustering.py` — Example script tying everything together.

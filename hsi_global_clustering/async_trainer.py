@@ -4,9 +4,9 @@ from typing import Optional, Callable, List, Tuple
 
 import torch
 import torch.nn as nn
-import torch.distributed.rpc as rpc
-from torch.distributed.rpc import RRef
-import threading
+import torch.multiprocessing as mp
+from torch.multiprocessing import Queue
+
 
 from torch.utils.data import Dataset
 
@@ -15,91 +15,32 @@ from .trainer import HSIClusteringTrainer, pad_and_stack, print_epoch_summary
 __all__ = ["AsyncHSIClusteringTrainer"]
 
 
-class DataServerRpc:
-    """Remote data server that prefetches batches via RPC."""
-
-    def __init__(
-        self,
-        mat_paths: List[str],
-        batch_size: int,
-        loader_fn: Callable[[str], Tuple[torch.Tensor, torch.Tensor]],
-        server_name: str = "dataserver",
-    ) -> None:
-        _init_rpc_backend(name=server_name)
-        self.mat_paths = mat_paths
-        self.batch_size = batch_size
-        self.loader_fn = loader_fn
-        self.buf_a: List[Tuple[torch.Tensor, torch.Tensor]] = []
-        self.buf_b: List[Tuple[torch.Tensor, torch.Tensor]] = []
-        self.current = self.buf_a
-        self.next = self.buf_b
-        self.idx = 0
-        self.lock = threading.Lock()
-        threading.Thread(target=self._prefetch_loop, daemon=True).start()
-
-    def _prefetch_loop(self) -> None:
-        N = len(self.mat_paths)
-        while True:
-            while len(self.next) < self.batch_size:
-                path = self.mat_paths[self.idx]
-                cube, label = self.loader_fn(path)
-                cube = cube.pin_memory()
-                label = label.pin_memory() if label is not None else None
-                self.next.append((cube, label))
-                self.idx = (self.idx + 1) % N
-
-            while True:
-                with self.lock:
-                    if len(self.current) == 0:
-                        break
-                pass
-
-            with self.lock:
-                self.current, self.next = self.next, self.current
-
-    @rpc.functions.async_execution
-    def get_batch(self) -> RRef:
-        with self.lock:
-            batch = [self.current.pop(0) for _ in range(self.batch_size)]
+def _data_server_loop(mat_paths, batch_size, loader_fn, queue):
+    """Background process that loads batches and puts them into a queue."""
+    idx = 0
+    N = len(mat_paths)
+    while True:
+        batch = []
+        for _ in range(batch_size):
+            path = mat_paths[idx]
+            cube, label = loader_fn(path)
+            batch.append((cube, label))
+            idx = (idx + 1) % N
 
         cubes, labels = pad_and_stack(batch)
-
-        fut: torch.futures.Future = torch.futures.Future()
-        fut.set_result(RRef((cubes, labels)))
-        return fut
-
-
-def _call_method(method, rref, *args, **kwargs):
-    return method(rref.local_value(), *args, **kwargs)
-
-
-def _init_rpc_backend(name: str) -> None:
-    """Initialize the RPC backend using environment variables."""
-    rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
-    master_addr = os.environ.get("MASTER_ADDR", "localhost")
-    master_port = os.environ.get("MASTER_PORT", "29500")
-    init_method = f"tcp://{master_addr}:{master_port}"
-
-    if not rpc.is_initialized():
-        rpc.init_rpc(
-            name=name,
-            rank=rank,
-            world_size=world_size,
-            backend=rpc.BackendType.TENSORPIPE,
-            rpc_backend_options=rpc.TensorPipeRpcBackendOptions(init_method=init_method),
-        )
+        cubes.share_memory_()
+        if labels is not None:
+            labels.share_memory_()
+        queue.put((cubes, labels))
 
 
 class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
-    """Trainer variant that pulls batches asynchronously from ``DataServerRpc``."""
+    """Trainer variant that pulls batches asynchronously from a background process."""
 
     def __init__(
         self,
         mat_paths: List[str],
         loader_fn: Callable[[str], Tuple[torch.Tensor, torch.Tensor]],
-        server_name: str = "server",
-        trainer_name: str = "trainer",
         val_dataset: Optional[Dataset] = None,
         steps_per_epoch: Optional[int] = None,
         *args,
@@ -107,31 +48,19 @@ class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
     ) -> None:
         super().__init__(train_dataset=None, val_dataset=val_dataset, reuse_iter=1, *args, **kwargs)
 
-        self.server_name = server_name
-        self.trainer_name = trainer_name
-
-        _init_rpc_backend(name=self.trainer_name)
-
-        self.server_rref = rpc.remote(
-            to=self.server_name,
-            func=DataServerRpc,
-            args=(mat_paths, self.batch_size, loader_fn, self.server_name),
-        )
+        self.mat_paths = mat_paths
+        self.loader_fn = loader_fn
 
         self.steps_per_epoch = steps_per_epoch or math.ceil(len(mat_paths) / self.batch_size)
 
-    def get_batch(self, timeout=None):
-        batch_rref: RRef = rpc.rpc_sync(
-            to=self.server_name,
-            func=_call_method,
-            args=(DataServerRpc.get_batch, self.server_rref),
-        )
-        cubes, labels = batch_rref.to_here()
-        cubes = cubes.cuda(non_blocking=True)
-        labels = labels.cuda(non_blocking=True) if labels is not None else None
-        return cubes, labels
-
     def train(self):
+        queue = Queue(maxsize=2)
+        server_proc = mp.Process(
+            target=_data_server_loop,
+            args=(self.mat_paths, self.batch_size, self.loader_fn, queue),
+        )
+        server_proc.start()
+
         loss_weight_kwargs = {}
         for loss_term in self.loss_weight_scheduler:
             if self.loss_weight_scheduler[loss_term]:
@@ -146,7 +75,7 @@ class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
             running_loss = 0.0
 
             for step in range(1, self.steps_per_epoch + 1):
-                cubes, _ = self.get_batch()
+                cubes, _ = queue.get()
                 if cubes.device != self.device:
                     cubes = cubes.to(self.device, non_blocking=True)
 
@@ -205,7 +134,10 @@ class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
         path = os.path.join(self.ckpt_dir, 'final')
         self.model.save(path)
         self.writer.close()
-        rpc.shutdown()
+
+        server_proc.terminate()
+        server_proc.join()
+
         print('HSIClustering training done !!')
         return None
 
