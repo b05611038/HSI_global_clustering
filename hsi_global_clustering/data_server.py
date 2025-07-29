@@ -2,9 +2,10 @@ import random
 import asyncio
 import torch.multiprocessing as mp
 import torch
-from typing import Union
-
+import queue
 from torch.utils.data import Dataset
+
+import sys
 
 from .trainer import pad_and_stack
 
@@ -13,25 +14,10 @@ __all__ = ["DataServer"]
 class DataServer:
     """Shared-memory data server with async I/O and double buffering.
 
-    This class continuously preloads items from a ``Dataset`` on a background
-    process. Two memory buffers are cycled so that while one buffer is being
-    consumed by the main process, the other is asynchronously filled with the
-    next item. Loaded tensors are moved to ``device`` and placed in shared
-    memory before being transferred, minimising inter-process communication
-    overhead.
-
-    Parameters
-    ----------
-    dataset : Dataset
-        Dataset to sample from.
-    queue_size : int, optional
-        Number of preloaded items (default: 2).
-    shuffle : bool, optional
-        Whether to shuffle indices each epoch.
-    seed : int, optional
-        Random seed for shuffling.
-    device : str or torch.device, optional
-        Device to move tensors to before enqueueing. Defaults to ``"cuda"``.
+    Preloads items from a `Dataset` on a background process. Async I/O is
+    handled in `_async_loop`, while `get_batch` returns a flag indicating
+    whether new data was retrieved. If no new data is available, get_batch
+    returns (False, None, None), allowing the main loop to retry.
     """
 
     def __init__(
@@ -39,23 +25,22 @@ class DataServer:
         dataset: Dataset,
         queue_size: int = 2,
         shuffle: bool = True,
-        seed: int = 0,
-        device: Union[str, torch.device] = "cuda",
     ):
-        self.dataset = dataset
-        self.queue_size = queue_size
-        self.shuffle = shuffle
-        self.seed = seed
-        self.device = torch.device(device)
 
+        dataset_size = len(dataset)
+        self.queue_size = min(queue_size, dataset_size)
+        self.dataset = dataset
+        self.shuffle = shuffle
+
+        # shared queues
         self._ctx = mp.get_context("spawn")
         self._ready_queue = self._ctx.Queue(maxsize=queue_size)
         self._free_queue = self._ctx.Queue(maxsize=queue_size)
+        for _ in range(queue_size):
+            self._free_queue.put(None)
 
-        for i in range(queue_size):
-            self._free_queue.put(i)
-
-        self._buffers = [None] * queue_size
+        # Event to signal first available item
+        self._start_event = self._ctx.Event()
         self._proc = None
 
     def start(self):
@@ -63,61 +48,95 @@ class DataServer:
         if self._proc is None:
             self._proc = self._ctx.Process(target=self._worker, daemon=True)
             self._proc.start()
+            # block until at least one item has been loaded
+            self._start_event.wait()
 
     def _worker(self):
-        if self.device.type == "cuda":
-            torch.cuda.set_device(self.device)
-
+        """Worker process to fill buffers asynchronously."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(self._async_loop())
 
     async def _async_loop(self):
+        """Asynchronous loop to load data into buffers."""
         idxs = list(range(len(self.dataset)))
-        rng = random.Random(self.seed)
+        rng = random.Random()
+
+        # Initial fill: load exactly queue_size samples
+        initial = True
         while True:
-            if self.shuffle:
-                rng.shuffle(idxs)
-            for idx in idxs:
-                buf_idx = await asyncio.to_thread(self._free_queue.get)
-                item = await asyncio.to_thread(self.dataset.__getitem__, idx)
+            # Refill and shuffle indices when exhausted
+            if not idxs:
+                idxs = list(range(len(self.dataset)))
+                if self.shuffle:
+                    rng.shuffle(idxs)
 
-                if isinstance(item, tuple):
-                    cube, label = item
-                else:
-                    cube, label = item, None
+            idx = idxs.pop(0)
 
-                cube = cube.to(self.device, non_blocking=True)
-                cube.share_memory_()
-                if label is not None:
-                    label = label.to(self.device, non_blocking=True)
-                    label.share_memory_()
+            await asyncio.to_thread(self._free_queue.get)
+            item = await asyncio.to_thread(self.dataset.__getitem__, idx)
+            if isinstance(item, tuple) and len(item) == 2:
+                cube, label = item
+            else:
+                cube, label = item, None
 
-                self._buffers[buf_idx] = (cube, label)
-                await asyncio.to_thread(self._ready_queue.put, buf_idx)
+            cube.share_memory_()
+            if label is not None:
+                label.share_memory_()
+                packed = (cube, label)
+            else:
+                packed = cube
+
+            await asyncio.to_thread(self._ready_queue.put, packed)
+            if initial:
+                try:
+                    if self._ready_queue.qsize() >= self.queue_size:
+                        self._start_event.set()
+                        initial = False
+                except Exception:
+                    self._start_event.set()
+                    initial = False
 
     def get_batch(self, batch_size: int):
-        """Retrieve ``batch_size`` items from the server.
+        """Retrieve a batch of items.
 
-        Each returned tensor resides in shared memory and is moved back to the
-        free queue once stacked into a batch.
+        Returns:
+            has_new (bool): True if new data was loaded, False otherwise.
+            cubes (Tensor) or None: batched data if has_new is True.
+            labels (Tensor) or None: batched labels if has_new is True.
         """
-        batch = []
-        buf_idxs = []
+        # Check if enough items are ready
+        try:
+            ready = self._ready_queue.qsize()
+        except Exception:
+            # Fallback: try peeking
+            try:
+                item = self._ready_queue.get_nowait()
+                self._ready_queue.put(item)
+                ready = 1
+            except Exception:
+                ready = 0
+
+        if ready < batch_size:
+            return False, None, None
+
+        # Retrieve exactly batch_size samples
+        samples = [self._ready_queue.get() for _ in range(batch_size)]
+
+        # Pad and stack samples
+        cubes, labels = pad_and_stack(samples)
+
+        # Release free-slot tokens for the consumed slots
         for _ in range(batch_size):
-            buf_idx = self._ready_queue.get()
-            batch.append(self._buffers[buf_idx])
-            buf_idxs.append(buf_idx)
+            self._free_queue.put(None)
 
-        cubes, labels = pad_and_stack(batch)
-
-        for idx in buf_idxs:
-            self._free_queue.put(idx)
-
-        return cubes, labels
+        return True, cubes, labels
 
     def stop(self):
         if self._proc is not None:
             self._proc.terminate()
             self._proc.join()
             self._proc = None
+            self._start_event.clear()
+
+

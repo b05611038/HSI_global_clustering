@@ -23,16 +23,14 @@ class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
         train_dataset: Dataset,
         val_dataset: Optional[Dataset] = None,
         steps_per_epoch: Optional[int] = None,
-        queue_size: Optional[int] = None,
         *args,
         **kwargs,
     ) -> None:
+
         super().__init__(train_dataset=None, val_dataset=val_dataset, reuse_iter=1, *args, **kwargs)
 
         self.dataset = train_dataset
-        if queue_size is None:
-            queue_size = self.batch_size
-        self.server = DataServer(train_dataset, queue_size=queue_size, device=self.device)
+        self.server = DataServer(train_dataset, queue_size=self.batch_size)
 
         self.steps_per_epoch = steps_per_epoch or math.ceil(len(train_dataset) / self.batch_size)
 
@@ -52,8 +50,12 @@ class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
             self.model.train()
             running_loss = 0.0
 
+            cubes = None
             for step in range(1, self.steps_per_epoch + 1):
-                cubes, _ = self.server.get_batch(self.batch_size)
+                has_new_data, new_cubes, _ = self.server.get_batch(self.batch_size)
+                if has_new_data:
+                    cubes = new_cubes
+                    cubes = cubes.to(self.device)
 
                 crops = self.augmentor(cubes)
                 c0, c1 = crops[:, 0], crops[:, 1]
