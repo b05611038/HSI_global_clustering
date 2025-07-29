@@ -2,7 +2,7 @@
 run_async_clustering.py
 
 Entry point script to train the hyperspectral clustering model using the
-``AsyncHSIClusteringTrainer`` with an RPC-based background data server.
+``AsyncHSIClusteringTrainer`` with a shared-memory background data loader.
 """
 import os
 import argparse
@@ -157,7 +157,7 @@ def main():
     # (Optional) build validation dataset by splitting or separate directory
     val_ds = deepcopy(train_ds)
 
-    # Setup RPC-based loader
+    # Setup shared-memory loader
     mat_paths = list(train_ds.files)
     idx_map = {p: i for i, p in enumerate(mat_paths)}
 
