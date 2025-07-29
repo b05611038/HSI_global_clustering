@@ -157,12 +157,6 @@ def main():
     # (Optional) build validation dataset by splitting or separate directory
     val_ds = deepcopy(train_ds)
 
-    # Setup shared-memory loader
-    mat_paths = list(train_ds.files)
-    idx_map = {p: i for i, p in enumerate(mat_paths)}
-
-    def loader_fn(path: str):
-        return train_ds[idx_map[path]]
 
     model_kwargs = deepcopy(DEFAULT_MODEL_KWARGS)
     model_kwargs.update({'num_bands': args.bands})
@@ -185,8 +179,7 @@ def main():
     scheduler_kwargs = deepcopy(DEFAULT_LOSS_WEIGHT_SCHEDULING)
 
     trainer = AsyncHSIClusteringTrainer(
-        mat_paths=mat_paths,
-        loader_fn=loader_fn,
+        train_dataset=train_ds,
         val_dataset=val_ds,
         augmentor=AugmentationPipeline((args.crop_h, args.crop_w)),
         model_kwargs=model_kwargs,

@@ -1,37 +1,18 @@
 import os
 import math
-from typing import Optional, Callable, List, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.multiprocessing as mp
-from torch.multiprocessing import Queue
 
 
 from torch.utils.data import Dataset
 
-from .trainer import HSIClusteringTrainer, pad_and_stack, print_epoch_summary
+from .data_server import DataServer
+
+from .trainer import HSIClusteringTrainer, print_epoch_summary
 
 __all__ = ["AsyncHSIClusteringTrainer"]
-
-
-def _data_server_loop(mat_paths, batch_size, loader_fn, queue):
-    """Background process that loads batches and puts them into a queue."""
-    idx = 0
-    N = len(mat_paths)
-    while True:
-        batch = []
-        for _ in range(batch_size):
-            path = mat_paths[idx]
-            cube, label = loader_fn(path)
-            batch.append((cube, label))
-            idx = (idx + 1) % N
-
-        cubes, labels = pad_and_stack(batch)
-        cubes.share_memory_()
-        if labels is not None:
-            labels.share_memory_()
-        queue.put((cubes, labels))
 
 
 class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
@@ -39,27 +20,24 @@ class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
 
     def __init__(
         self,
-        mat_paths: List[str],
-        loader_fn: Callable[[str], Tuple[torch.Tensor, torch.Tensor]],
+        train_dataset: Dataset,
         val_dataset: Optional[Dataset] = None,
         steps_per_epoch: Optional[int] = None,
+        queue_size: Optional[int] = None,
         *args,
         **kwargs,
     ) -> None:
         super().__init__(train_dataset=None, val_dataset=val_dataset, reuse_iter=1, *args, **kwargs)
 
-        self.mat_paths = mat_paths
-        self.loader_fn = loader_fn
+        self.dataset = train_dataset
+        if queue_size is None:
+            queue_size = self.batch_size
+        self.server = DataServer(train_dataset, queue_size=queue_size, device=self.device)
 
-        self.steps_per_epoch = steps_per_epoch or math.ceil(len(mat_paths) / self.batch_size)
+        self.steps_per_epoch = steps_per_epoch or math.ceil(len(train_dataset) / self.batch_size)
 
     def train(self):
-        queue = Queue(maxsize=2)
-        server_proc = mp.Process(
-            target=_data_server_loop,
-            args=(self.mat_paths, self.batch_size, self.loader_fn, queue),
-        )
-        server_proc.start()
+        self.server.start()
 
         loss_weight_kwargs = {}
         for loss_term in self.loss_weight_scheduler:
@@ -75,9 +53,7 @@ class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
             running_loss = 0.0
 
             for step in range(1, self.steps_per_epoch + 1):
-                cubes, _ = queue.get()
-                if cubes.device != self.device:
-                    cubes = cubes.to(self.device, non_blocking=True)
+                cubes, _ = self.server.get_batch(self.batch_size)
 
                 crops = self.augmentor(cubes)
                 c0, c1 = crops[:, 0], crops[:, 1]
@@ -135,8 +111,7 @@ class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
         self.model.save(path)
         self.writer.close()
 
-        server_proc.terminate()
-        server_proc.join()
+        self.server.stop()
 
         print('HSIClustering training done !!')
         return None
