@@ -13,6 +13,15 @@ from hsi_global_clustering import (JSONMATDataset,
                                    HyperspectralClusteringModel,
                                    HSIClusteringTrainer)
 
+from hsi_global_clustering.default_argument import (
+    DEFAULT_MODEL_KWARGS,
+    DEFAULT_OPTIMIZER_KWARGS,
+    DEFAULT_LOSS_WEIGHT_SCHEDULING,
+    DEFAULT_EMA_DECAY,
+    DEFAULT_EMA_KICK,
+    DEFAULT_EMA_KICK_SCHEDULING,
+)
+
 from hsi_global_clustering.hsi_processing import normalize_cube
 
 def parse_args():
@@ -44,7 +53,7 @@ def parse_args():
         help='Number of workers in Pytorch dataloader.'
     )
     parser.add_argument(
-        '--bands', type=int, default=301,
+        '--bands', type=int, default=DEFAULT_MODEL_KWARGS['num_bands'],
         help='Number of spectral bands in the HSI data'
     )
     parser.add_argument(
@@ -56,23 +65,23 @@ def parse_args():
         help='Width of spatial crop'
     )
     parser.add_argument(
-        '--embed_dim', type=int, default=32,
+        '--embed_dim', type=int, default=DEFAULT_MODEL_KWARGS['encoder_kwargs']['embed_dim'],
         help='Dimension of latent embedding from the encoder'
     )
     parser.add_argument(
-        '--n_clusters', type=int, default=4,
+        '--n_clusters', type=int, default=DEFAULT_MODEL_KWARGS['mean_shift_kwargs']['n_clusters'],
         help='Number of clusters (centroids) in the mean-shift module'
     )
     parser.add_argument(
-        '--num_iters', type=int, default=5,
+        '--num_iters', type=int, default=DEFAULT_MODEL_KWARGS['mean_shift_kwargs']['num_iters'],
         help='Number of mean-shift iterations (unrolled steps)'
     )
     parser.add_argument(
-        '--ema_decay', type=float, default=0.99,
+        '--ema_decay', type=float, default=DEFAULT_EMA_DECAY,
         help='EMA decay of cluster centroid moving.'
     )
     parser.add_argument(
-        '--ema_kick', type=float, default=0.01,
+        '--ema_kick', type=float, default=DEFAULT_EMA_KICK,
         help='EMA random kick of non-acitivated centroid.'
     )
     parser.add_argument(
@@ -92,35 +101,35 @@ def parse_args():
         help='Repeated use in a single HSI acquistion.'
     )
     parser.add_argument(
-        '--coef_orth', type=float, default=0.1,
+        '--coef_orth', type=float, default=DEFAULT_MODEL_KWARGS['loss_weights']['orth'],
         help='Coefficient of orthogonal centroid panelization in loss fuction.'
     )
     parser.add_argument(
-        '--coef_bal', type=float, default=1.0,
+        '--coef_bal', type=float, default=DEFAULT_MODEL_KWARGS['loss_weights']['bal'],
         help='Coefficient of balanced cluster usage in loss function.',
     )
     parser.add_argument(
-        '--coef_unif', type=float, default=1.0,
+        '--coef_unif', type=float, default=DEFAULT_MODEL_KWARGS['loss_weights']['unif'],
         help='Coefficient of uniformly assign cluster in loss function.',
     )
     parser.add_argument(
-        '--coef_cons', type=float, default=1.0,
+        '--coef_cons', type=float, default=DEFAULT_MODEL_KWARGS['loss_weights']['cons'],
         help='Coefficient of panelizing inconsistent of two cropped HSI in loss function.',
     )
     parser.add_argument(
-        '--lr', type=float, default=1e-4,
+        '--lr', type=float, default=DEFAULT_OPTIMIZER_KWARGS['lr'],
         help='Initial learning rate for the optimizer'
     )
     parser.add_argument(
-        '--beta1', type=float, default=0.9,
+        '--beta1', type=float, default=DEFAULT_OPTIMIZER_KWARGS['betas'][0],
         help='Beta1 of AdamW.'
     )
     parser.add_argument(
-        '--beta2', type=float, default=0.999,
+        '--beta2', type=float, default=DEFAULT_OPTIMIZER_KWARGS['betas'][1],
         help='Beta1 of AdamW.'
     )
     parser.add_argument(
-        '--wd', type=float, default=0.01,
+        '--wd', type=float, default=DEFAULT_OPTIMIZER_KWARGS['weight_decay'],
         help='Weight decay (L2 regularization)'
     )
     parser.add_argument(

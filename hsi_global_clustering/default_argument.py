@@ -14,9 +14,9 @@ DEFAULT_MODEL_KWARGS = {
         'num_iters': 5,
     },
     'loss_weights': {
-        'orth': 0.1,
-        'bal': 1.0,
-        'unif': 1.0,
+        'orth': 0.001,
+        'bal': 2.0,
+        'unif': 2.0,
         'cons': 1.0,
     },
 }
@@ -35,5 +35,5 @@ DEFAULT_LOSS_WEIGHT_SCHEDULING = {
 }
 
 DEFAULT_EMA_DECAY = 0.99
-DEFAULT_EMA_KICK = 0.01
-DEFAULT_EMA_KICK_SCHEDULING = True
+DEFAULT_EMA_KICK = 0.05
+DEFAULT_EMA_KICK_SCHEDULING = False

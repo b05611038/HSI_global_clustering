@@ -27,7 +27,7 @@ for CKPT_PATH in "$CHKPT_ROOT"/*; do
   OUT_DIR="${OUT_BASE}/${MODEL_NAME}/${CKPT_NAME}"
   mkdir -p "$OUT_DIR"
 
-  echo "→ Running layout on checkpoint ‘$CKPT_NAME’"
+  echo "→ Running layout on ‘$MODEL_NAME’ checkpoint ‘$CKPT_NAME’"
   python3 layout_predictions.py \
     --checkpoint_path "$CKPT_PATH" \
     --mat_dir "$MAT_DIR" \
