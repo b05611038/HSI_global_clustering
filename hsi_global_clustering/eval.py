@@ -139,9 +139,10 @@ def cluster_entropy(
     labels: Tensor,      # (H,W) or (N,H,W), integer labels
     num_classes: Optional[int] = None
 ) -> Tensor:
-    flat = labels.view(-1)
+    flat = labels.view(-1).int()
     if num_classes is None:
         num_classes = int(flat.max()) + 1
+
     counts = torch.bincount(flat, minlength=num_classes).float()
     probs = counts / counts.sum()
     nz = probs > 0
@@ -161,7 +162,7 @@ def mutual_information(
 
     # 1) joint histogram (flattened)
     idx = a * num_classes + b
-    joint_counts = torch.bincount(idx, minlength=num_classes**2).float()
+    joint_counts = torch.bincount(idx.int(), minlength=num_classes**2).float()
 
     # 2) reshape into [K×K] and normalize
     joint = joint_counts.view(num_classes, num_classes) / N

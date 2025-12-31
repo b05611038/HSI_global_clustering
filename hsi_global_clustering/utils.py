@@ -1,12 +1,14 @@
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 
 import safetensors
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-__all__ = ['save_as_safetensors', 'load_safetensors', 'LinearWarmupDecayScheduler']
+__all__ = ['save_as_safetensors', 'load_safetensors', 'split_patches',
+        'merge_patches', 'LinearWarmupDecayScheduler']
 
 def save_as_safetensors(tensors, filename):
     assert isinstance(tensors, dict)
@@ -33,6 +35,131 @@ def load_safetensors(filename, device = 'cpu', extension_check = True):
             tensors[key] = in_files.get_tensor(key)
 
     return tensors
+
+def split_patches(image, scale_ratio=2, overlap=0, pad_mode='reflect'):
+    """
+    Split image into patches based on scale_ratio.
+    Handles arbitrary image shapes by padding to make them divisible.
+    
+    Args:
+        image: torch.Tensor of shape [B, N, H, W]
+        scale_ratio: int, division factor for height and width
+                     - 2 means H // 2, W // 2 (4 patches in 2x2 grid)
+                     - 4 means H // 4, W // 4 (16 patches in 4x4 grid)
+        overlap: int, overlap pixels between adjacent patches (default: 0)
+        pad_mode: str, padding mode ('reflect', 'replicate', 'constant')
+                  - 'reflect': reflect padding (good for natural images)
+                  - 'replicate': edge replication
+                  - 'constant': zero padding
+    
+    Returns:
+        patches: List of patch tensors, length = scale_ratio * scale_ratio
+        split_info: Dictionary containing information needed for merging
+    """
+    B, N, H, W = image.shape
+    original_shape = (B, N, H, W)
+
+    # Calculate required padding to make H and W divisible by scale_ratio
+    pad_h = (scale_ratio - H % scale_ratio) % scale_ratio
+    pad_w = (scale_ratio - W % scale_ratio) % scale_ratio
+
+    # Distribute padding evenly on both sides
+    pad_top = pad_h // 2
+    pad_bottom = pad_h - pad_top
+    pad_left = pad_w // 2
+    pad_right = pad_w - pad_left
+
+    # Pad the image if needed
+    if pad_h > 0 or pad_w > 0:
+        # F.pad expects (left, right, top, bottom)
+        padding = (pad_left, pad_right, pad_top, pad_bottom)
+        image_padded = F.pad(image, padding, mode=pad_mode)
+    else:
+        padding = (0, 0, 0, 0)
+        image_padded = image
+
+    B_pad, N_pad, H_pad, W_pad = image_padded.shape
+    padded_shape = (B_pad, N_pad, H_pad, W_pad)
+
+    # Calculate patch size without overlap
+    patch_h_base = H_pad // scale_ratio
+    patch_w_base = W_pad // scale_ratio
+
+    patches = []
+    boundaries = []
+
+    for i in range(scale_ratio):
+        for j in range(scale_ratio):
+            # Calculate boundaries with overlap
+            h_start = max(0, i * patch_h_base - overlap)
+            h_end = min(H_pad, (i + 1) * patch_h_base + overlap)
+            w_start = max(0, j * patch_w_base - overlap)
+            w_end = min(W_pad, (j + 1) * patch_w_base + overlap)
+
+            # Extract patch
+            patch = image_padded[:, :, h_start:h_end, w_start:w_end]
+            patches.append(patch)
+            boundaries.append((h_start, h_end, w_start, w_end))
+
+    split_info = {
+        'original_shape': original_shape,
+        'padded_shape': padded_shape,
+        'scale_ratio': scale_ratio,
+        'overlap': overlap,
+        'boundaries': boundaries,
+        'padding': padding,
+        'patch_h': patch_h_base,
+        'patch_w': patch_w_base,
+        'pad_mode': pad_mode
+    }
+
+    return patches, split_info
+
+def merge_patches(patches, split_info):
+    """
+    Merge patches back into full image.
+    Uses averaging in overlapping regions and removes padding.
+    
+    Args:
+        patches: List of patch tensors, each of shape [B, N, h, w]
+                 Note: N can be different from the original image (e.g., after segmentation)
+        split_info: Dictionary from split_patches
+    
+    Returns:
+        merged: torch.Tensor of shape [B, N, H, W] - original spatial size, but N from patches
+    """
+    B_orig, N_orig, H_orig, W_orig = split_info['original_shape']
+    B_pad, N_pad_orig, H_pad, W_pad = split_info['padded_shape']
+    boundaries = split_info['boundaries']
+    pad_left, pad_right, pad_top, pad_bottom = split_info['padding']
+
+    # Get device, dtype, and ACTUAL channel dimension from first patch
+    device = patches[0].device
+    dtype = patches[0].dtype
+    B_actual, N_actual = patches[0].shape[:2]  # Infer from actual patch
+
+    # Initialize output and weight maps for averaging overlaps (with padding)
+    # Use N_actual (from patches) instead of N_pad_orig (from split_info)
+    merged = torch.zeros(B_actual, N_actual, H_pad, W_pad, device=device, dtype=dtype)
+    weight_map = torch.zeros(B_actual, 1, H_pad, W_pad, device=device, dtype=dtype)
+
+    # Place each patch in the merged output
+    for patch, (h_start, h_end, w_start, w_end) in zip(patches, boundaries):
+        merged[:, :, h_start:h_end, w_start:w_end] += patch
+        weight_map[:, :, h_start:h_end, w_start:w_end] += 1
+
+    # Average overlapping regions (weight_map broadcasts across channels)
+    merged = merged / (weight_map + 1e-8)  # Add small epsilon to avoid division by zero
+
+    # Remove padding to restore original shape
+    if pad_top > 0 or pad_bottom > 0 or pad_left > 0 or pad_right > 0:
+        h_start = pad_top
+        h_end = H_pad - pad_bottom if pad_bottom > 0 else H_pad
+        w_start = pad_left
+        w_end = W_pad - pad_right if pad_right > 0 else W_pad
+        merged = merged[:, :, h_start:h_end, w_start:w_end]
+
+    return merged
 
 
 class LinearWarmupDecayScheduler:

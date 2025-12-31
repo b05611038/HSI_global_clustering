@@ -68,8 +68,13 @@ class AsyncHSIClusteringTrainer(HSIClusteringTrainer):
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                 self.optimizer.step()
 
+                with torch.no_grad():
+                    with torch.amp.autocast(device_type=self.device.type, enabled=(self.precision != 'fp32')):
+                        loss, loss_dict, ema_dict = self.model.train_step(c0, c1, **loss_weight_kwargs)
+
                 z1, p1 = ema_dict['z1'], ema_dict['p1']
                 z2, p2 = ema_dict['z2'], ema_dict['p2']
+
                 self._ema_update_centroids(z1, p1, z2, p2, self.ema_decay, ema_kick_scale)
 
                 running_loss += loss.item()

@@ -74,9 +74,9 @@ class HyperspectralEncoder(nn.Module):
         B, C, H, W = x.shape
 
         # spectral processing
-        x_spec = x.view(B, C, H * W)
+        x_spec = x.reshape(B, C, H * W)
         x_spec = self.spectral_net(x_spec)
-        x_spec = x_spec.view(B, -1, H, W)
+        x_spec = x_spec.reshape(B, -1, H, W)
         
         # spatial processing
         x_spat = self.spatial_net(x_spec)

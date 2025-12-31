@@ -13,7 +13,11 @@ from torch.utils.tensorboard import SummaryWriter
 
 from typing import Optional, Callable, Dict, Tuple, Union
 
-from .utils import LinearWarmupDecayScheduler
+from .utils import (
+    split_patches, merge_patches, 
+    LinearWarmupDecayScheduler
+)
+
 from .hsi_clustering import HyperspectralClusteringModel
 from .eval import (
     iou_score, dice_score, area_rmse,
@@ -162,6 +166,8 @@ def print_epoch_summary(
         ]
 
     print(" | ".join(parts), flush=True)
+
+
 
 
 class HSIClusteringTrainer:
@@ -376,6 +382,10 @@ class HSIClusteringTrainer:
                     nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                     self.optimizer.step()
 
+                    with torch.no_grad():
+                        with torch.amp.autocast(device_type=self.device.type, enabled=(self.precision != 'fp32')):
+                            loss, loss_dict, ema_dict = self.model.train_step(c0, c1, **loss_weight_kwargs)
+
                     z1, p1 = ema_dict['z1'], ema_dict['p1']
                     z2, p2 = ema_dict['z2'], ema_dict['p2']
 
@@ -481,8 +491,24 @@ class HSIClusteringTrainer:
         for batch in self.val_loader:
             cubes, labels = batch
             cubes = cubes.to(self.device)
-            preds = self.model.inference(cubes)[0]
-            curr_epoch_preds.append(preds.cpu())
+            split_info, scale_ratio = None, None
+            if cubes.shape[2] > 480 or cubes.shape[3] > 480:
+                scale_ratio = max(cubes.shape[2: ]) // 480
+                (split_cubes, 
+                 split_info) = split_patches(cubes, 
+                                             scale_ratio = 2, 
+                                             overlap = 16, 
+                                             pad_mode = 'reflect')
+
+                preds = []
+                for cubes in split_cubes:
+                    preds.append(self.model.inference(cubes))
+
+                preds = merge_patches(preds, split_info).cpu()
+            else:
+                preds = self.model.inference(cubes).cpu()
+
+            curr_epoch_preds.append(preds)
 
             if labels is not None:
                 labels = labels.to(self.device)
@@ -579,7 +605,23 @@ class HSIClusteringTrainer:
             for step, batch in enumerate(loader):
                 cubes, labels = batch
                 cubes = cubes.to(self.device)
-                preds = self.model.inference(cubes)
+                split_info, scale_ratio = None, None
+                if cubes.shape[2] > 480 or cubes.shape[3] > 480:
+                    scale_ratio = max(cubes.shape[2: ]) // 480
+                    (split_cubes,
+                     split_info) = split_patches(cubes,
+                                                 scale_ratio = 2,
+                                                 overlap = 16,
+                                                 pad_mode = 'reflect')
+
+                    preds = []
+                    for cubes in split_cubes:
+                        preds.append(self.model.inference(cubes))
+
+                    preds = merge_patches(preds, split_info)
+                else:
+                    preds = self.model.inference(cubes)
+
                 all_preds.append(preds.long().cpu())
                 if labels is not None:
                     all_labels.append(labels.long())
