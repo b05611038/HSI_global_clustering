@@ -234,7 +234,6 @@ layout_predictions.py        # Batch visualization of cluster maps
 - **Background-tissue separation:** Mean IoU **0.925** (K=2, binary clustering)
 - **Unsupervised disease detection:** Lesions form coherent clusters in DGC-4 (K=4)
 - **Training time:** <30 minutes on RTX 4080 (10GB VRAM) for typical datasets
-- **Memory efficiency:** Constant VRAM usage regardless of full image size
 
 ### Navigable Granularity Example
 
@@ -305,21 +304,11 @@ Extended abstract presented at ACPA 2025 (Agronomy and Crop Physiology Associati
 
 ---
 
-## Authors & Acknowledgments
+## Authors
 
-### Authors
+**Yu-Tang Chang, Pin-Wei Chen, Shih-Fang Chen**
 
-**Yu-Tang Chang** (b05611038@ntu.edu.tw) — Conceptualization, Methodology, Software, Writing
-**Pin-Wei Chen** — Investigation, Validation
-**Shih-Fang Chen** — Supervision, Resources
-
-*Department of Biomechatronics Engineering, National Taiwan University, Taiwan*
-
-### Acknowledgments
-
-We thank **Xiu-Rui Lin** (Agricultural Chemicals Research Institute, Ministry of Agriculture) for providing the leaf disease hyperspectral dataset used in this research.
-
-Development assisted by AI coding tools (OpenAI Codex, Anthropic Claude) under human design direction.
+Dataset provided by Xiu-Rui Lin (Agricultural Chemicals Research Institute, Ministry of Agriculture).
 
 ---
 
