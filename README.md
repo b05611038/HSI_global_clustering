@@ -308,7 +308,7 @@ Extended abstract presented at ACPA 2025 (Agronomy and Crop Physiology Associati
 
 **Yu-Tang Chang, Pin-Wei Chen, Shih-Fang Chen**
 
-Dataset provided by Xiu-Rui Lin (Agricultural Chemicals Research Institute, Ministry of Agriculture).
+Domain knowledge consultation by Xiu-Rui Lin (Agricultural Chemicals Research Institute, Ministry of Agriculture).
 
 ---
 
