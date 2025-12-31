@@ -1,50 +1,118 @@
-# HSI_global_clustering
+# Deep Global Clustering for Hyperspectral Image Segmentation
 
-This repository implements an end-to-end, label-free hyperspectral image (HSI) clustering framework that produces globally aligned cluster IDs across scenes. It embeds a differentiable mean-shift layer within a spectral–spatial encoder, and uses an exponential moving-average (EMA) centroid dictionary with entropy balancing for stable, automatic cluster convergence.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![ArXiv](https://img.shields.io/badge/arXiv-XXXX.XXXXX-b31b1b.svg)](https://arxiv.org/abs/XXXX.XXXXX)
 
-## Features
+This repository implements **Deep Global Clustering (DGC)**, a conceptual framework for memory-efficient, label-free hyperspectral image (HSI) clustering. DGC learns global cluster structure from local patch observations using differentiable mean-shift and an exponential moving-average (EMA) centroid dictionary.
 
-- **Spectral–Spatial Encoder**: Stacked 1D spectral CNN and 2D spatial CNN with ℓ²-normalized pixel embeddings.
-- **Unrolled Mean-Shift Module**: Differentiable mean-shift attractor with learned bandwidth and optional approximations for scalability.
-- **Global Centroid Dictionary**: EMA updates of cluster centroids, with automatic low-mass pruning.
-- **Self-Supervised Losses**: Compactness, orthogonality, balance, and crop-consistency terms.
-- **Data Augmentation**: Overlapping two-crop strategy, random affine, and wavelength shifts.
-- **GPU-friendly Metrics**: IoU, Dice, Area RMSE, entropy, NMI, VI—all implemented in PyTorch.
-- **Single-GPU Trainer**: Custom `Trainer` class with mixed-precision, gradient clipping, checkpointing, TensorBoard logging, early stopping, and flexible inference.
-- **Async Trainer**: Shared-memory queue used by `AsyncHSIClusteringTrainer` to prefetch data in a background process for non-blocking GPU transfer.
+**Project Status:** This is a research framework demonstrating core concepts (overlapping grids, navigable granularity, sparse activation). The synchronous trainer is functional for reported results; the asynchronous variant exhibits optimization instability and is included for diagnostic purposes.
+
+---
+
+## Overview
+
+### What is DGC?
+
+DGC addresses the challenge of clustering large hyperspectral images (e.g., 1000×1000×301) with limited GPU memory by:
+
+- **Training on small patches** (64×64) while learning **global cluster assignments**
+- Achieving **constant memory usage** regardless of full image size
+- Operating in an **unsupervised, label-free** manner
+
+### Design Philosophy
+
+**1. Overlapping Grids**
+Two random crops from the same HSI cube create overlapping regions. Pixels in the overlap must receive consistent cluster IDs, while non-overlapping pixels learn independently. This enforces global structure through local observations.
+
+**2. Navigable Granularity**
+Unlike fixed K-means, DGC starts with more clusters (e.g., K=16) and lets users merge them to desired semantic levels. This "coarse-to-fine" refinement is user-controlled, not hardcoded.
+
+**3. Sparse Activation**
+Not all K clusters activate in every scene. Healthy leaves use only background + tissue clusters; infected leaves activate additional lesion clusters. This mimics bottom-up concept learning.
+
+**4. Efficiency Through Patches**
+64×64 patches from 1000×1000 cubes provide a 250× memory reduction. Combined with reuse iterations (sample multiple patches per load), DGC trains in **<30 minutes on a consumer GPU** (RTX 4080, 10GB VRAM).
+
+---
+
+## Key Features
+
+- **Spectral–Spatial Encoder**: 1D spectral CNN + 2D spatial CNN with ℓ²-normalized embeddings
+- **Unrolled Mean-Shift Module**: Differentiable clustering with learned bandwidth
+- **Global Centroid Dictionary**: EMA updates with automatic low-mass centroid pruning
+- **Self-Supervised Losses**: Compactness, orthogonality, balance, and crop-consistency
+- **Data Augmentation**: Overlapping two-crop strategy, random affine, wavelength shifts
+- **GPU-Accelerated Metrics**: IoU, Dice, RMSE, entropy, NMI, VI (PyTorch implementations)
+- **Flexible Trainers**:
+  - `HSIClusteringTrainer` — stable synchronous training
+  - `AsyncHSIClusteringTrainer` — shared-memory prefetching (experimental, unstable)
+
+---
 
 ## Installation
 
-Install required Python packages:
+**Requirements:** Python 3.8+, PyTorch 1.12+, CUDA 11.0+ (recommended)
 
 ```bash
+# Clone repository
+git clone https://github.com/b05611038/HSI_global_clustering.git
+cd HSI_global_clustering
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
+**Dependencies:** `torch`, `numpy`, `scipy`, `h5py`, `pillow`, `tensorboard`, `safetensors`
+
+---
+
 ## Dataset Preparation
 
-Place your hyperspectral `.mat` files (each containing a `cube` array of shape `(C,H,W)`) in a directory, along with optional LabelMe-style JSON annotations:
+### Data Format
+
+DGC expects HSI cubes stored as MATLAB `.mat` files with a specific structure:
+
+**Required:**
+- `.mat` file containing a hyperspectral cube under key `'cube'` (or custom key)
+- Cube shape: `(C, H, W)` where C = spectral bands, H/W = spatial dimensions
+- Supported formats: Standard `.mat` (scipy) or HDF5-based `.mat` (h5py)
+
+**Optional (for evaluation):**
+- **LabelMe JSON annotations** (for semantic labels) OR
+- **`.pth` label files** (pre-rasterized PyTorch tensors)
+
+### Example Directory Structure
 
 ```
-/data/hsi_mat/
-  scene01.mat
-  scene02.mat
-  ...
-/data/hsi_json/
-  scene01.json
-  scene02.json
-  ...
+/data/
+├── hsi_mat/
+│   ├── scene01.mat    # Contains 'cube': (301, 1024, 1024)
+│   ├── scene02.mat
+│   └── ...
+├── hsi_json/          # Optional: LabelMe annotations
+│   ├── scene01.json
+│   ├── scene02.json
+│   └── ...
+└── hsi_labels/        # Optional: Pre-rasterized labels
+    ├── scene01.pth
+    └── ...
 ```
+
+**Note:** Filenames must match across directories (e.g., `scene01.mat` ↔ `scene01.json`).
+
+---
 
 ## Quick Start
 
-Use the `run_clustering.py` script to train and evaluate. You can specify embedding dimension, number of clusters, and mean-shift iterations:
+### Training (Synchronous)
+
+Use `run_clustering.py` for stable training:
 
 ```bash
 python run_clustering.py \
   --mat_dir /data/hsi_mat \
   --json_dir /data/hsi_json \
-  --out_dir /outputs \
+  --out_dir ./outputs \
   --bands 301 \
   --crop_h 64 --crop_w 64 \
   --embed_dim 32 \
@@ -53,74 +121,212 @@ python run_clustering.py \
   --epochs 50 \
   --batch 4 \
   --lr 1e-3 \
-  --wd 1e-4 \
   --device cuda
 ```
 
-For asynchronous loading (useful when the dataset is stored on slow disks) run
-`run_async_clustering.py` with the same arguments. It launches a background
-process that populates a shared-memory queue so that batches can be retrieved
-without blocking GPU transfer.
-
-Default hyperparameters for the model, optimizer and EMA behaviour are defined in
-`hsi_global_clustering/default_argument.py` and shared by both training scripts.
+**Key Arguments:**
+- `--mat_dir`: Directory with `.mat` HSI cubes
+- `--json_dir`: Optional annotation directory (omit for unsupervised)
+- `--out_dir`: Output path for logs/checkpoints
+- `--bands`: Number of spectral channels (e.g., 301 for our dataset)
+- `--n_clusters`: Number of cluster centroids (start with 64, merge later)
+- `--num_iters`: Mean-shift unrolling steps (3 is typical)
 
 This will:
+1. Create `outputs/logs/` (TensorBoard) and `outputs/checkpoints/` (model saves)
+2. Train with overlapping two-crop augmentation
+3. Save checkpoints every `--save_interval` epochs
 
-1. Create output folders (`logs/`, `checkpoints/`) under `/outputs`.
-2. Train the model with overlapping two-crop augmentation and mixed-precision.
-3. Log losses and metrics to TensorBoard (`/outputs/logs`).
-4. Save checkpoint files to `/outputs/checkpoints`.
-5. Run inference on the training set and save predictions to `/outputs/predictions.pt`.
+### Training (Asynchronous - Experimental)
+
+For async data loading (faster I/O on slow disks, **but optimization is unstable**):
+
+```bash
+python run_async_clustering.py \
+  --mat_dir /data/hsi_mat \
+  --json_dir /data/hsi_json \
+  --out_dir ./outputs \
+  --bands 301 \
+  --epochs 50 \
+  --steps_per_epoch 1000 \
+  --device cuda
+```
+
+**Warning:** Async trainer exhibits "firework" instability (clusters form briefly then collapse). Use only for research/diagnostic purposes. See paper for detailed failure mode analysis.
+
+---
 
 ## Evaluation & Inference
 
-The `eval_clustering.py` utility runs inference and computes metrics. It accepts
-either automatic Hungarian alignment or a manual mapping between clusters and
-semantic labels:
+### Clustering Evaluation
+
+Run inference and compute metrics (IoU, Dice, RMSE) using `eval_clustering.py`:
 
 ```bash
+# Automatic Hungarian alignment
 python eval_clustering.py \
-  --checkpoint_path /path/to/ckpt \
+  --checkpoint_path ./outputs/checkpoints/model_epoch_50.pth \
   --mat_dir /data/hsi_mat \
   --json_dir /data/hsi_json \
-  --auto-align                # or --manual-mapping '{0:[0],1:[1,2,3]}'
+  --auto-align \
+  --device cuda
+
+# Manual cluster-to-label mapping
+python eval_clustering.py \
+  --checkpoint_path ./outputs/checkpoints/model_epoch_50.pth \
+  --mat_dir /data/hsi_mat \
+  --label_dir /data/hsi_labels \
+  --manual-mapping '{0:[0,1],1:[2,3,4]}' \
+  --device cuda
 ```
 
-For image layouts of all cubes in a directory, see `layout_predictions.py` (also
-used by `run_layout.sh`).
+**Manual Mapping Format:** JSON dict mapping semantic labels (keys) to cluster IDs (values). Example: `{0:[0,1], 1:[2,3]}` merges clusters 0,1 → label 0 and clusters 2,3 → label 1.
 
-## Code Structure
+### Visualization
 
-- `hsi_global_clustering/datasets.py` — `JSONMATDataset` for streaming `.mat` + JSON loading.
-- `hsi_global_clustering/hsi_processing.py` — GPU-friendly augmentation pipeline.
-- `hsi_global_clustering/hsi_clustering.py` — `HyperspectralClusteringModel` combining encoder + mean-shift.
-- `hsi_global_clustering/trainer.py` — `Trainer` class for single-GPU training and evaluation.
-- `hsi_global_clustering/async_trainer.py` — asynchronous training via a
-  shared-memory queue; `data_server.py` contains the legacy multiprocessing
-  loader.
-- `hsi_global_clustering/eval.py` — PyTorch implementations of IoU, Dice, RMSE, entropy, NMI, VI.
-- `hsi_global_clustering/default_argument.py` — shared default hyperparameters for the training scripts.
-- `run_clustering.py` — Example script tying everything together.
-
-## TensorBoard Monitoring
-
-Start TensorBoard to visualize training and validation metrics:
+Generate color-coded cluster maps for all images:
 
 ```bash
-tensorboard --logdir /outputs/logs
+python layout_predictions.py \
+  --checkpoint_path ./outputs/checkpoints/model_epoch_50.pth \
+  --mat_dir /data/hsi_mat \
+  --out_dir ./outputs/predictions \
+  --img_dir ./outputs/images \
+  --layout_image \
+  --device cuda
 ```
+
+Outputs:
+- `--layout_pth`: Saves cluster maps as `.pth` tensors
+- `--layout_image`: Saves color-coded PNG images (8 distinct colors for clusters 0-7)
+
+---
+
+## Project Structure
+
+```
+hsi_global_clustering/
+├── dataset.py               # JSONMATDataset for .mat + JSON/label loading
+├── hsi_processing.py        # Normalization & augmentation pipeline
+├── hsi_clustering.py        # HyperspectralClusteringModel (encoder + mean-shift)
+├── trainer.py               # HSIClusteringTrainer (synchronous, stable)
+├── async_trainer.py         # AsyncHSIClusteringTrainer (unstable)
+├── data_server.py           # Shared-memory data prefetching (used by async)
+├── eval.py                  # Metrics: IoU, Dice, RMSE, NMI, VI
+├── default_argument.py      # Shared default hyperparameters
+└── module/
+    ├── encoder.py           # Spectral-spatial CNN encoder
+    └── clustering.py        # Unrolled mean-shift module
+
+# Entry point scripts
+run_clustering.py            # Synchronous training script
+run_async_clustering.py      # Asynchronous training script (experimental)
+eval_clustering.py           # Inference + metrics evaluation
+layout_predictions.py        # Batch visualization of cluster maps
+```
+
+---
+
+## Results & Capabilities
+
+### Reported Performance (Synchronous Trainer)
+
+- **Background-tissue separation:** Mean IoU **0.925** (K=2, binary clustering)
+- **Unsupervised disease detection:** Lesions form coherent clusters in DGC-4 (K=4)
+- **Training time:** <30 minutes on RTX 4080 (10GB VRAM) for typical datasets
+
+### Navigable Granularity Example
+
+| K | Semantic Level | Typical Clusters |
+|---|----------------|------------------|
+| 2 | Coarse | Background, Foreground |
+| 4 | Medium | Background, Healthy Tissue, Lesion, Edge |
+| 8+ | Fine | Detailed spectral variations |
+
+Users start with higher K and manually merge clusters to desired abstraction level.
+
+---
+
+## Known Limitations
+
+### Synchronous Trainer
+- ⚠️ **Hyperparameter sensitive**: Results require careful tuning within narrow parameter ranges
+- ⚠️ **Centroid initialization matters**: Different seeds may converge to different solutions
+- ⚠️ **Multi-objective balancing**: Four loss terms (compactness, orthogonality, balance, consistency) require careful weighting
+- ✅ **Stable enough** for reported results when properly configured
+
+### Asynchronous Trainer
+- ❌ **Severe optimization instability**: "Firework" behavior (patterns emerge briefly then collapse)
+- ❌ **No reliable stopping criterion**: Cannot detect optimal training phase automatically
+- ❌ **No quantitative results reported**: Included for research/diagnostic purposes only
+- 🔬 **See paper Section 5** for detailed failure mode analysis
+
+### Root Cause
+The primary bottleneck is **multi-objective loss balancing**, not architecture. Fixed loss weights (λ) are insufficient for dynamic equilibrium across contradictory objectives. The brief "ignite" phase in async training proves the concept works; maintaining stability is the challenge.
+
+---
+
+## Monitoring Training
+
+Launch TensorBoard to visualize losses and metrics:
+
+```bash
+tensorboard --logdir ./outputs/logs
+```
+
+Key metrics to watch:
+- `loss/total`: Overall objective
+- `loss/compactness`: Intra-cluster tightness
+- `loss/orthogonality`: Inter-cluster separation
+- `loss/balance`: Cluster size uniformity
+- `metrics/active_clusters`: Number of non-empty clusters
+
+---
 
 ## Citation
 
-If you use this code in your research, please cite:
+If you use this code or find the concepts useful, please cite:
 
-> **[Paper Title]**  
-> Author1, Author2, ...  
-> Conference/Journal, Year.
+```bibtex
+@article{chang2025dgc,
+  title={Deep Global Clustering for Hyperspectral Image Segmentation: Concepts, Applications, and Open Challenges},
+  author={Chang, Yu-Tang and Chen, Pin-Wei and Chen, Shih-Fang},
+  journal={arXiv preprint arXiv:XXXX.XXXXX},
+  year={2025},
+  note={Submitted to arXiv cs.CV}
+}
+```
+
+**ArXiv link:** [https://arxiv.org/abs/XXXX.XXXXX](https://arxiv.org/abs/XXXX.XXXXX) *(to be updated upon assignment)*
+
+**Conference Presentation:**
+Extended abstract presented at ACPA 2025 (Agronomy and Crop Physiology Association), October 2025.
+
+---
+
+## Authors
+
+**Yu-Tang Chang, Pin-Wei Chen, Shih-Fang Chen**
+
+Domain knowledge consultation by Xiu-Rui Lin (Agricultural Chemicals Research Institute, Ministry of Agriculture).
+
+---
 
 ## License
 
-This project is licensed under the MIT License. See `LICENSE` for details.
+This project is licensed under the **MIT License**. See [LICENSE](LICENSE) for details.
 
+---
 
+## Contributing & Contact
+
+This is a research project demonstrating conceptual frameworks. We welcome:
+- Bug reports and fixes for existing functionality
+- Discussion of design philosophy and failure modes
+- Extensions addressing optimization stability
+
+For questions or collaboration inquiries, contact Yu-Tang Chang at b05611038@ntu.edu.tw.
+
+---
+
+**Note:** This framework is intended as "intellectual scaffolding" for HSI clustering research. The synchronous trainer provides functional baseline results; addressing optimization instability in the asynchronous variant remains an open challenge. We prioritize honest reporting of limitations over inflated performance claims.
