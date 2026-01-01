@@ -1,7 +1,7 @@
 # Deep Global Clustering for Hyperspectral Image Segmentation
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![ArXiv](https://img.shields.io/badge/arXiv-XXXX.XXXXX-b31b1b.svg)](https://arxiv.org/abs/XXXX.XXXXX)
+[![ArXiv](https://img.shields.io/badge/arXiv-2512.24172-b31b1b.svg)](https://arxiv.org/abs/2512.24172)
 
 This repository implements **Deep Global Clustering (DGC)**, a conceptual framework for memory-efficient, label-free hyperspectral image (HSI) clustering. DGC learns global cluster structure from local patch observations using differentiable mean-shift and an exponential moving-average (EMA) centroid dictionary.
 
@@ -291,13 +291,13 @@ If you use this code or find the concepts useful, please cite:
 @article{chang2025dgc,
   title={Deep Global Clustering for Hyperspectral Image Segmentation: Concepts, Applications, and Open Challenges},
   author={Chang, Yu-Tang and Chen, Pin-Wei and Chen, Shih-Fang},
-  journal={arXiv preprint arXiv:XXXX.XXXXX},
+  journal={arXiv preprint arXiv:2512.24172},
   year={2025},
   note={Submitted to arXiv cs.CV}
 }
 ```
 
-**ArXiv link:** [https://arxiv.org/abs/XXXX.XXXXX](https://arxiv.org/abs/XXXX.XXXXX) *(to be updated upon assignment)*
+**ArXiv link:** [https://arxiv.org/abs/2512.24172](https://arxiv.org/abs/2512.24172) *(to be updated upon assignment)*
 
 **Conference Presentation:**
 Extended abstract presented at ACPA 2025 (Agronomy and Crop Physiology Association), October 2025.
