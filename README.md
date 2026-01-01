@@ -251,13 +251,13 @@ Users start with higher K and manually merge clusters to desired abstraction lev
 
 ### Synchronous Trainer
 - ⚠️ **Hyperparameter sensitive**: Results require careful tuning within narrow parameter ranges
-- ⚠️ **Centroid initialization matters**: Different seeds may converge to different solutions
+- ⚠️ **Centroid initialization matters**: Different CNN and center initialization (seed) may converge to different solutions
 - ⚠️ **Multi-objective balancing**: Four loss terms (compactness, orthogonality, balance, consistency) require careful weighting
 - ✅ **Stable enough** for reported results when properly configured
 
 ### Asynchronous Trainer
 - ❌ **Severe optimization instability**: "Firework" behavior (patterns emerge briefly then collapse)
-- ❌ **No reliable stopping criterion**: Cannot detect optimal training phase automatically
+- ❌ **No reliable stopping criterion**: Cannot detect optimal training phase
 - ❌ **No quantitative results reported**: Included for research/diagnostic purposes only
 - 🔬 **See paper Section 5** for detailed failure mode analysis
 
@@ -297,7 +297,7 @@ If you use this code or find the concepts useful, please cite:
 }
 ```
 
-**ArXiv link:** [https://arxiv.org/abs/2512.24172](https://arxiv.org/abs/2512.24172) *(to be updated upon assignment)*
+**ArXiv link:** [https://arxiv.org/abs/2512.24172](https://arxiv.org/abs/2512.24172)
 
 **Conference Presentation:**
 Extended abstract presented at ACPA 2025 (Agronomy and Crop Physiology Association), October 2025.
