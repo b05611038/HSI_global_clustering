@@ -33,6 +33,34 @@ Not all K clusters activate in every scene. Healthy leaves use only background +
 **4. Efficiency Through Patches**
 64×64 patches from 1000×1000 cubes provide a 250× memory reduction. Combined with reuse iterations (sample multiple patches per load), DGC trains in **<30 minutes on a consumer GPU** (RTX 4080, 10GB VRAM).
 
+### Results
+
+DGC learns global cluster structure within a few training epochs. The following examples show how segmentation patterns emerge during training.  
+
+The dataset contains tea leaves at different disease stages. Healthy and infected plants were kept in the same chamber to ensure pathogen transmission. Sample 1 shows healthy leaves, Sample 2 shows leaves with medium lesion development (day 3 post-infection), and Sample 3 shows leaves with larger lesion areas (day 5 post-infection). 
+
+#### DGC-2 (Background / Tissue)
+
+| Sample | Pseudo Image | Epoch 4 | Epoch 8 | Epoch 10 |
+|--------|--------------|---------|---------|----------|
+| 1 (Healthy) | ![](img/sample1_pseudo.png) | ![](img/sample1_dgc2_ep4.png) | ![](img/sample1_dgc2_ep8.png) | ![](img/sample1_dgc2_ep10.png) |
+| 2 (Day 3) | ![](img/sample2_pseudo.png) | ![](img/sample2_dgc2_ep4.png) | ![](img/sample2_dgc2_ep8.png) | ![](img/sample2_dgc2_ep10.png) |
+| 3 (Day 5) | ![](img/sample3_pseudo.png) | ![](img/sample3_dgc2_ep4.png) | ![](img/sample3_dgc2_ep8.png) | ![](img/sample3_dgc2_ep10.png) |
+
+With two clusters, DGC separates background from tissue. Lesion areas are grouped with either background or tissue depending on their spectral similarity.
+
+#### DGC-4 (Background / Tissue / Lesion)
+
+| Sample | Pseudo Image | Epoch 6 | Epoch 8 | Epoch 10 |
+|--------|--------------|---------|---------|----------|
+| 1 (Healthy) | ![](img/sample1_pseudo.png) | ![](img/sample1_dgc4_ep6.png) | ![](img/sample1_dgc4_ep8.png) | ![](img/sample1_dgc4_ep10.png) |
+| 2 (Day 3) | ![](img/sample2_pseudo.png) | ![](img/sample2_dgc4_ep6.png) | ![](img/sample2_dgc4_ep8.png) | ![](img/sample2_dgc4_ep10.png) |
+| 3 (Day 5) | ![](img/sample3_pseudo.png) | ![](img/sample3_dgc4_ep6.png) | ![](img/sample3_dgc4_ep8.png) | ![](img/sample3_dgc4_ep10.png) |
+
+With four clusters, DGC distinguishes background texture, healthy tissue, and lesion regions. The lesion cluster activates only in infected samples—healthy leaves use fewer clusters, demonstrating sparse activation behavior.
+
+Segmentation patterns emerge within 4–6 epochs and become meaningful by evolving to epoch 10.
+
 ---
 
 ## Key Features
